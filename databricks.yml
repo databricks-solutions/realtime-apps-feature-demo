@@ -1,0 +1,46 @@
+bundle:
+  name: realtime_app_demo
+
+variables:
+  # Required — must be supplied per workspace.
+  cluster_id:
+    description: |
+      ID of an existing All-Purpose cluster that meets the RTM requirements
+      (DBR 17.3 LTS Classic, Photon off, autoscale off, no spot, SINGLE_USER,
+      `realTimeMode.enabled=true`, `sortBeforeRepartition=false`). Create one
+      per README's "Configure for your workspace" step and set this variable.
+
+  # Have defaults; usually fine as-is but override per environment.
+  catalog:
+    description: Unity Catalog that hosts the schema and checkpoint volume.
+    default: main
+  project_id:
+    description: Lakebase Autoscaling project slug. Must be globally unique within the workspace.
+    default: realtime-demo
+  branch_name:
+    description: Lakebase branch. Created automatically as `production` on project creation.
+    default: production
+  database_name:
+    description: Default database name in a new Lakebase Autoscaling project.
+    default: databricks_postgres
+  pg_role:
+    description: Postgres role used by both the streaming sink and the FastAPI app.
+    default: demo_writer
+  pg_password:
+    description: Password for `pg_role`. Override with `--var pg_password=…` for real deployments.
+    default: demo-password-please-rotate
+  secret_scope:
+    description: Databricks secret scope holding Lakebase connection credentials.
+    default: realtime-demo
+
+include:
+  - resources/*.yml
+
+# Targets are workspace-agnostic. Pass `--profile <name>` at deploy time to
+# select which workspace to hit (or set `DATABRICKS_CONFIG_PROFILE`); the
+# `cluster_id` variable is required. See README's "Configure for your
+# workspace" section. Clone `dev` to add `prod`, `staging`, etc.
+targets:
+  dev:
+    default: true
+    mode: development

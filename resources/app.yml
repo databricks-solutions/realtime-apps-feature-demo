@@ -1,0 +1,34 @@
+resources:
+  apps:
+    rt_demo_app:
+      name: realtime-demo
+      description: Realtime app demo — FastAPI + React polling at 100ms against Lakebase.
+      source_code_path: ../src/app
+      resources:
+        - name: lakebase-host
+          description: Postgres host
+          secret:
+            scope: ${var.secret_scope}
+            key: lakebase_host
+            permission: READ
+
+        - name: lakebase-db-name
+          description: Postgres database name
+          secret:
+            scope: ${var.secret_scope}
+            key: lakebase_db
+            permission: READ
+
+        - name: lakebase-user
+          description: Postgres role
+          secret:
+            scope: ${var.secret_scope}
+            key: lakebase_user
+            permission: READ
+
+        - name: lakebase-password
+          description: Postgres password
+          secret:
+            scope: ${var.secret_scope}
+            key: lakebase_password
+            permission: READ
