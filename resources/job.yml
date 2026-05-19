@@ -8,16 +8,13 @@ resources:
       # is a job-level safety net in case the stream wedges before timeout.
       timeout_seconds: 4000
 
-      # Both tasks run on a pre-existing All-Purpose cluster (referenced via
-      # `${var.cluster_id}`) so the demo doesn't pay 3–5 minutes of cluster
-      # boot per iteration. The cluster must meet the skill's RTM requirements:
-      # DBR 17.3 LTS Classic, Photon off, autoscale off, no spot, SINGLE_USER,
-      # with both `realTimeMode.enabled=true` and `sortBeforeRepartition=false`
-      # set in `spark_conf`. See README's "Configure for your workspace" step.
+      # Both tasks run on the bundle-managed cluster declared in
+      # resources/cluster.yml. Reusing one All-Purpose cluster avoids the
+      # 3–5 min job-cluster boot per run.
 
       tasks:
         - task_key: init
-          existing_cluster_id: ${var.cluster_id}
+          existing_cluster_id: ${resources.clusters.rt_demo_cluster.id}
           notebook_task:
             notebook_path: ../src/notebooks/init.py
             base_parameters:
@@ -31,7 +28,7 @@ resources:
         - task_key: stream
           depends_on:
             - task_key: init
-          existing_cluster_id: ${var.cluster_id}
+          existing_cluster_id: ${resources.clusters.rt_demo_cluster.id}
           notebook_task:
             notebook_path: ../src/notebooks/stream.py
             base_parameters:

@@ -21,6 +21,7 @@ realtime-app-demo/
 ├── databricks.yml                 # Bundle root: variables, targets
 ├── resources/
 │   ├── lakebase.yml               # postgres_projects, schema, volume
+│   ├── cluster.yml                # All-Purpose cluster (RTM-configured)
 │   ├── job.yml                    # Triggered RTM job (init → stream tasks)
 │   └── app.yml                    # Databricks App + secret bindings
 └── src/
@@ -44,7 +45,7 @@ The target workspace must satisfy all of the following:
 - **Databricks Apps enabled.**
 - **You have permission to** create All-Purpose clusters, UC schemas/volumes, secret scopes, and jobs.
 
-Cost note: Lakebase Autoscaling with `no_suspension: true` is billed continuously (the smallest setting, 0.5–1 CU, is about $0.50/h). The All-Purpose cluster used by the streaming job (`m5d.large` × 2 on AWS) is about $0.30/h. Tear down when you're done — see "Tear down" below.
+Cost note: Lakebase Autoscaling with `no_suspension: true` is billed continuously (the smallest setting, 0.5–1 CU, is about $0.50/h). The All-Purpose cluster the bundle creates (`m5d.large` × 2 on AWS) is about $0.30/h while running; it autoterminates after 120 min idle. Tear down when you're done — see "Tear down" below.
 
 ## Configure for your workspace
 
@@ -62,82 +63,14 @@ You'll pass `--profile <your-profile-name>` to every `bundle …` command below 
 
 ### 2. Pick a Unity Catalog
 
-Default is `main` (works on most workspaces). Override if your workspace uses a different catalog name, either by editing the `catalog` variable's default in `databricks.yml`, or via `--var catalog=<your_catalog>` at deploy time.
+Default is `main` (works on most workspaces). Override if your workspace uses a different catalog name, either by editing the `catalog` variable's default in `databricks.yml`, or via `export BUNDLE_VAR_catalog=<your_catalog>` at deploy time.
 
-### 3. Create the All-Purpose cluster and capture its ID
+### 3. (Azure / GCP only) Adjust the cluster spec
 
-The bundle references the cluster via `${var.cluster_id}` — there is no default, so deploy will fail until this is set. Pick the snippet for your cloud:
+The bundle creates the All-Purpose cluster automatically — no manual step on AWS. For non-AWS workspaces, edit `resources/cluster.yml`:
 
-<details>
-<summary><b>AWS</b></summary>
-
-```bash
-databricks clusters create --json '{
-  "cluster_name": "rt-demo-rtm-keepalive",
-  "spark_version": "17.3.x-scala2.13",
-  "data_security_mode": "SINGLE_USER",
-  "single_user_name": "<your email>",
-  "runtime_engine": "STANDARD",
-  "node_type_id": "m5d.large",
-  "driver_node_type_id": "m5d.large",
-  "num_workers": 1,
-  "autotermination_minutes": 120,
-  "aws_attributes": {"availability": "ON_DEMAND", "first_on_demand": 2},
-  "spark_conf": {
-    "spark.databricks.streaming.realTimeMode.enabled": "true",
-    "spark.sql.execution.sortBeforeRepartition": "false"
-  }
-}'
-```
-</details>
-
-<details>
-<summary><b>Azure</b></summary>
-
-```bash
-databricks clusters create --json '{
-  "cluster_name": "rt-demo-rtm-keepalive",
-  "spark_version": "17.3.x-scala2.13",
-  "data_security_mode": "SINGLE_USER",
-  "single_user_name": "<your email>",
-  "runtime_engine": "STANDARD",
-  "node_type_id": "Standard_D4ds_v5",
-  "driver_node_type_id": "Standard_D4ds_v5",
-  "num_workers": 1,
-  "autotermination_minutes": 120,
-  "azure_attributes": {"availability": "ON_DEMAND_AZURE"},
-  "spark_conf": {
-    "spark.databricks.streaming.realTimeMode.enabled": "true",
-    "spark.sql.execution.sortBeforeRepartition": "false"
-  }
-}'
-```
-</details>
-
-<details>
-<summary><b>GCP</b></summary>
-
-```bash
-databricks clusters create --json '{
-  "cluster_name": "rt-demo-rtm-keepalive",
-  "spark_version": "17.3.x-scala2.13",
-  "data_security_mode": "SINGLE_USER",
-  "single_user_name": "<your email>",
-  "runtime_engine": "STANDARD",
-  "node_type_id": "n2-standard-4",
-  "driver_node_type_id": "n2-standard-4",
-  "num_workers": 1,
-  "autotermination_minutes": 120,
-  "gcp_attributes": {"use_preemptible_executors": false},
-  "spark_conf": {
-    "spark.databricks.streaming.realTimeMode.enabled": "true",
-    "spark.sql.execution.sortBeforeRepartition": "false"
-  }
-}'
-```
-</details>
-
-Copy the returned `cluster_id` from the JSON response. You'll pass it to `bundle deploy` via `--var cluster_id=<id>`. (Or hard-code it under `targets.dev.variables.cluster_id` in `databricks.yml` if you don't want to repeat the flag.)
+- **Azure**: replace `aws_attributes` with `azure_attributes: { availability: ON_DEMAND_AZURE }` and change `node_type_id`/`driver_node_type_id` to e.g. `Standard_D4ds_v5`.
+- **GCP**: replace `aws_attributes` with `gcp_attributes: { use_preemptible_executors: false }` and use e.g. `n2-standard-4`.
 
 ### 4. Pre-seed the secret scope
 
@@ -162,11 +95,10 @@ export BUNDLE_VAR_pg_password=$(openssl rand -hex 24)
 
 ## Deploy
 
-For brevity, set these once per shell — both env vars are picked up by every `databricks bundle …` command below:
+For brevity, set this once per shell:
 
 ```bash
 export DATABRICKS_CONFIG_PROFILE=<your-profile-name>
-export BUNDLE_VAR_cluster_id=<cluster id from step 3>
 # (Optional) Only if your catalog isn't `main`:
 # export BUNDLE_VAR_catalog=<your_catalog>
 ```
@@ -240,13 +172,10 @@ Edit and redeploy; the next `bundle run rt_demo_job` picks up the new values.
 databricks bundle destroy --target dev
 ```
 
-Removes the job, app, schema, volume, and Lakebase project. **Manual steps still needed** to fully zero costs:
+Removes the cluster, job, app, schema, volume, and Lakebase project. **One manual step** still needed:
 
 ```bash
-# 1. The All-Purpose cluster — bundle didn't create it, so won't delete it.
-databricks clusters delete $BUNDLE_VAR_cluster_id
-
-# 2. The secret scope — created out-of-band; won't be removed by destroy.
+# The secret scope is created out-of-band, so `bundle destroy` doesn't remove it.
 databricks secrets delete-scope realtime-demo
 ```
 
@@ -258,7 +187,7 @@ databricks secrets delete-scope realtime-demo
 | Lakebase Autoscaling | Postgres-compatible, low-latency reads, scales to ~1 CU for the demo. |
 | Triggered job, two tasks (init → stream) | Stream is bounded by `awaitTermination(timeout)`; each run is one hour by default. Init runs once per run and is idempotent. |
 | DBR 17.3 LTS Classic, Photon off, autoscale off | Real-Time Mode requirements. |
-| Existing cluster, not job cluster | Skips 3–5 min cluster boot per iteration during development. |
+| Bundle-managed All-Purpose cluster, not job cluster | Skips 3–5 min cluster boot per run; cluster autoterminates after 120 min idle. |
 | Password auth via secret scope (not OAuth) | OAuth doesn't survive the executor-side `ForeachWriter` lifecycle. |
 | `INSERT … ON CONFLICT` upsert in the sink | Idempotent restarts — re-processing the same row no-ops. |
 | Plain HTML + canvas (no React/Recharts) | One file, no build step, ~85 lines. |
@@ -269,7 +198,6 @@ databricks secrets delete-scope realtime-demo
 | Issue | Fix |
 |---|---|
 | `databricks bundle validate` fails with "profile not found" | Run `databricks auth login --profile <your-profile>` and retry. |
-| Any `bundle …` command fails: `Variable "cluster_id" does not have a value assigned` | Set `export BUNDLE_VAR_cluster_id=<id>` once per shell, or pass `--var "cluster_id=<id>"` to that command, or hard-code under `targets.dev.variables.cluster_id`. |
 | Bundle deploy fails: `Invalid secret resource …: Secret with scope realtime-demo and key … does not exist` | Run step 4 of "Configure for your workspace" (the secret-scope seeding). |
 | Init fails: `Provided authentication token is not a valid JWT encoding` connecting to Lakebase | The notebook session token is NOT a valid Lakebase Postgres credential. The notebook mints a short-lived JWT via `POST /api/2.0/postgres/credentials` and uses it as the admin password. |
 | Init fails: `database "<x>" does not exist` | The default Lakebase Autoscaling database is `databricks_postgres` (underscore). Don't override `database_name` unless you've also created that database in Lakebase. |
@@ -277,7 +205,7 @@ databricks secrets delete-scope realtime-demo
 | Stream task: `IndentationError: unexpected indent (lakebase_sink.py, line 1)` | `bundle deploy` corrupts the first line of `lakebase_sink.py` if it begins with `"""`. Keep the file starting with a `#` comment line (current code does). |
 | Stream task: `ImportError: cannot import name 'ForeachWriter' from 'pyspark.sql.streaming'` | `ForeachWriter` is a Scala symbol; Python uses duck-typed objects with `open/process/close`. `lakebase_sink.py` already does this; if you re-add the base-class import, this is why it breaks. |
 | Stream is RUNNING but rows have stale timestamps for >60 s | The rate source persists `startTimeMs` in its checkpoint. The notebook clears the checkpoint dir at the top of the stream task; if you change that path, ensure the wipe still runs. |
-| Stream is RUNNING but no rows in `events` for >60 s | Probably an orphan stream from a previous run holding the checkpoint lock on the shared `existing_cluster_id`. Cancel the active job run, `databricks clusters restart <cluster_id>`, and trigger a fresh `bundle run rt_demo_job`. |
+| Stream is RUNNING but no rows in `events` for >60 s | Probably an orphan stream from a previous run holding the checkpoint lock on the shared cluster. Cancel the active job run, restart the cluster from the Compute UI (or `databricks clusters restart <id>`), and trigger a fresh `bundle run rt_demo_job`. |
 | App KPI tile says `stream stopped` | The freshest event in Postgres is more than 5 s old — usually means the job's `run_duration_seconds` elapsed. Trigger another run. |
 | App page is stuck on `—` | Env vars haven't picked up the rotated secrets (true after the very first bundle deploy + run). Run `databricks apps stop && databricks apps start realtime-demo`. |
 | Lag display is > 1 s | Check the cluster: DBR ≥ 17.3 LTS, Photon off, autoscale off, ≥ 1 worker, `realTimeMode.enabled=true`, `sortBeforeRepartition=false`, trigger is `realTime="5 minutes"` (not `processingTime`). |

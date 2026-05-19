@@ -1,0 +1,25 @@
+resources:
+  clusters:
+    # The All-Purpose cluster the job tasks attach to. Bundle-managed: created
+    # by `bundle deploy`, deleted by `bundle destroy`. Autoterminates after
+    # 120 min of inactivity to cap idle cost.
+    #
+    # The spec below is AWS. For Azure or GCP, swap `aws_attributes` for the
+    # cloud-specific block and pick a comparable node type — see README's
+    # "Configure for your workspace" appendix.
+    rt_demo_cluster:
+      cluster_name: rt-demo-rtm-keepalive
+      spark_version: 17.3.x-scala2.13
+      data_security_mode: SINGLE_USER
+      single_user_name: ${workspace.current_user.userName}
+      runtime_engine: STANDARD            # Photon off — required by RTM
+      node_type_id: m5d.large
+      driver_node_type_id: m5d.large
+      num_workers: 1                      # autoscale off — required by RTM
+      autotermination_minutes: 120
+      aws_attributes:
+        availability: ON_DEMAND           # no spot — required by RTM
+        first_on_demand: 2
+      spark_conf:
+        spark.databricks.streaming.realTimeMode.enabled: "true"
+        spark.sql.execution.sortBeforeRepartition: "false"
