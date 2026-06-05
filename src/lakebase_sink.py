@@ -21,7 +21,7 @@ import psycopg
 class LakebaseSink:
     def __init__(self, host: str, database: str, user: str, password: str,
                  table: str, port: int = 5432, key_col: str = "id",
-                 max_dwell_ms: int = 100):
+                 max_dwell_ms: int = 10):
         self.host = host
         self.database = database
         self.user = user

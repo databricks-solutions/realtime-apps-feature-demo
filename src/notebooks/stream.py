@@ -29,9 +29,10 @@ dbutils.widgets.text("run_duration_seconds", "3600")
 # 100 TX/s per connection at 1 CU). Rows accumulate in memory and the sink
 # commits the whole buffer only after `sink_max_dwell_ms` has elapsed since
 # the previous commit — capping Lakebase TX/s at `1000 / sink_max_dwell_ms`
-# while batch size grows with the source rate. Default 100 ms (≤10 TX/s) is
-# safe from 10–1000 rps; drop to 10 ms only if you raise Lakebase CU.
-dbutils.widgets.text("sink_max_dwell_ms", "100")
+# while batch size grows with the source rate. Default 10 ms (≤100 TX/s)
+# sits right at the 1 CU ceiling — ideal at ~1000 rps where ~10 rows batch
+# per commit. Raise it (e.g. 100 ms → ≤10 TX/s) for headroom at lower rates.
+dbutils.widgets.text("sink_max_dwell_ms", "10")
 
 checkpoint_path   = dbutils.widgets.get("checkpoint_path")
 scope             = dbutils.widgets.get("secret_scope")
