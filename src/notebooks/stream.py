@@ -22,7 +22,7 @@
 
 dbutils.widgets.text("checkpoint_path", "")
 dbutils.widgets.text("secret_scope", "realtime-demo")
-dbutils.widgets.text("rows_per_second", "10")
+dbutils.widgets.text("rows_per_second", "500")
 dbutils.widgets.text("run_duration_seconds", "3600")
 # sink_max_dwell_ms throttles the LakebaseSink so a single connection can't
 # saturate Postgres with too many per-row commits (Lakebase tops out around
