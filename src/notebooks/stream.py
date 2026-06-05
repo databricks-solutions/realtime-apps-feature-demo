@@ -24,11 +24,20 @@ dbutils.widgets.text("checkpoint_path", "")
 dbutils.widgets.text("secret_scope", "realtime-demo")
 dbutils.widgets.text("rows_per_second", "10")
 dbutils.widgets.text("run_duration_seconds", "3600")
+# sink_max_dwell_ms throttles the LakebaseSink so a single connection can't
+# saturate Postgres with too many per-row commits (Lakebase tops out around
+# 100 TX/s per connection at 1 CU). Rows accumulate in memory and the sink
+# commits the whole buffer only after `sink_max_dwell_ms` has elapsed since
+# the previous commit — capping Lakebase TX/s at `1000 / sink_max_dwell_ms`
+# while batch size grows with the source rate. Default 100 ms (≤10 TX/s) is
+# safe from 10–1000 rps; drop to 10 ms only if you raise Lakebase CU.
+dbutils.widgets.text("sink_max_dwell_ms", "100")
 
-checkpoint_path = dbutils.widgets.get("checkpoint_path")
-scope           = dbutils.widgets.get("secret_scope")
-rows_per_second = int(dbutils.widgets.get("rows_per_second"))
-duration        = int(dbutils.widgets.get("run_duration_seconds"))
+checkpoint_path   = dbutils.widgets.get("checkpoint_path")
+scope             = dbutils.widgets.get("secret_scope")
+rows_per_second   = int(dbutils.widgets.get("rows_per_second"))
+duration          = int(dbutils.widgets.get("run_duration_seconds"))
+sink_max_dwell_ms = int(dbutils.widgets.get("sink_max_dwell_ms"))
 
 # COMMAND ----------
 
@@ -87,6 +96,7 @@ sink = LakebaseSink(
     password=dbutils.secrets.get(scope, "lakebase_password"),
     table="events",
     key_col="id",
+    max_dwell_ms=sink_max_dwell_ms,
 )
 
 # COMMAND ----------

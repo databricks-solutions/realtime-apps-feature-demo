@@ -71,22 +71,38 @@
   // Latest API response, shared between poll() and redraw().
   let data = null;
 
-  // Per-poll latency observations: each entry is one freshness measurement
-  // captured at poll time, so averaging is not window-size-biased. Trimmed
-  // to the trailing WIN ms so we have enough history to bucket the chart.
+  // Per-row latency observations: one sample per newly-seen event, recorded
+  // the first time we see it. Each sample is `server_ts − event.timestamp`,
+  // i.e. that row's true pipeline latency including any time it spent in the
+  // sink's buffer. Trimmed to the trailing WIN ms.
   const samples = [];
+  let lastSeenId = -1;    // monotonic event.id high-water mark, dedupes polls
 
-  // poll: fetch the newest events into `data`, then capture one latency
-  // sample from the freshest event. Runs every POLL ms.
+  // poll: fetch the newest events into `data`, then push one latency sample
+  // per row we haven't seen before (events come back newest-first; once we
+  // hit a row at-or-below lastSeenId, everything older is already sampled).
   async function poll() {
     try {
       const r = await fetch('/api/events/latest?limit=' + LIMIT);
       if (!r.ok) return;
       data = await r.json();
-      const ev = data.events?.[0];
-      if (!ev) return;
+      if (!data.events?.length) return;
       const t = Date.now();
-      samples.push({ t, i: +new Date(data.server_ts) - +new Date(ev.timestamp) });
+      const srv = +new Date(data.server_ts);
+      const newestId = data.events[0].id;
+      // Stream restart detection: when the rate source's checkpoint is wiped,
+      // its `value` counter resets to 0 — so a newest id below our high-water
+      // mark means a new stream session. Reset state so the new ids get
+      // sampled cleanly (rather than all being skipped as "already seen").
+      if (newestId < lastSeenId) {
+        lastSeenId = -1;
+        samples.length = 0;
+      }
+      for (const ev of data.events) {
+        if (ev.id <= lastSeenId) break;
+        samples.push({ t, i: srv - +new Date(ev.timestamp) });
+      }
+      lastSeenId = Math.max(lastSeenId, newestId);
       while (samples.length && t - samples[0].t > WIN) samples.shift();
     } catch {}            // network blip; next tick retries
   }

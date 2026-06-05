@@ -39,3 +39,6 @@ resources:
               secret_scope: ${var.secret_scope}
               rows_per_second: "10"
               run_duration_seconds: "3600"
+              # Caps Lakebase TX/s at 1000 / sink_max_dwell_ms. See the widget
+              # docstring in stream.py for the rate / dwell trade-off.
+              sink_max_dwell_ms: "100"

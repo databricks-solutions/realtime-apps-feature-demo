@@ -8,6 +8,8 @@
 # Authenticates with Postgres password (NOT OAuth) — required for executor-side
 # custom sinks; the SDK's OAuth path does not work in ForeachWriter context.
 
+import time
+
 import psycopg
 
 
@@ -19,7 +21,7 @@ import psycopg
 class LakebaseSink:
     def __init__(self, host: str, database: str, user: str, password: str,
                  table: str, port: int = 5432, key_col: str = "id",
-                 buffer_size: int = 1):
+                 max_dwell_ms: int = 100):
         self.host = host
         self.database = database
         self.user = user
@@ -27,11 +29,15 @@ class LakebaseSink:
         self.table = table
         self.port = port
         self.key_col = key_col
-        # buffer_size caps how many rows we hold before flushing. The default of
-        # 1 (per-row commit) is the right choice for this *latency* demo: the
-        # buffer no longer dominates end-to-end lag. Bump to 100+ for throughput
-        # demos at >100 rows/sec.
-        self.buffer_size = buffer_size
+        # max_dwell_ms is the minimum time between commits. Each process(row)
+        # call appends to the in-memory buffer and flushes only if at least
+        # this many ms have passed since the last flush. The effective
+        # Lakebase TX/s ceiling is 1000 / max_dwell_ms; at higher source
+        # rates more rows accumulate per flush. Caveat: because the check
+        # only fires on row arrival, at sustained low rates (rate <
+        # 1000/max_dwell_ms) a row can wait up to one inter-arrival time
+        # for the next row to trigger its flush — fine for steady sources.
+        self.max_dwell_ms = max_dwell_ms
 
     def open(self, partition_id, epoch_id):
         # Lakebase requires SSL; sslmode is hard-coded rather than parameterised.
@@ -45,11 +51,12 @@ class LakebaseSink:
             autocommit=False,
         )
         self.buffer = []
+        self.last_flush_ms = self._now_ms()
         return True
 
     def process(self, row):
         self.buffer.append(row)
-        if len(self.buffer) >= self.buffer_size:
+        if self._now_ms() - self.last_flush_ms >= self.max_dwell_ms:
             self._flush()
 
     def close(self, error):
@@ -89,3 +96,8 @@ class LakebaseSink:
             raise
         finally:
             self.buffer.clear()
+            self.last_flush_ms = self._now_ms()
+
+    @staticmethod
+    def _now_ms():
+        return int(time.monotonic() * 1000)
