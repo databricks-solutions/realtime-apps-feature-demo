@@ -12,7 +12,7 @@ resources:
             key: lakebase_host
             permission: READ
 
-        - name: lakebase-db-name
+        - name: lakebase-db
           description: Postgres database name
           secret:
             scope: ${var.secret_scope}

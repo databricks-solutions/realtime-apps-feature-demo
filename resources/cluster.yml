@@ -9,7 +9,11 @@ resources:
     # "Configure for your workspace" appendix.
     rt_demo_cluster:
       cluster_name: rt-demo-rtm-keepalive
-      spark_version: 17.3.x-scala2.13
+      # DBR 18.3+ is required by the native Lakebase `format("postgresql")`
+      # streaming sink used by stream.py. (DBR 18.3 is available even though
+      # the `clusters spark-versions` API list doesn't include it — the API
+      # accepts it as a valid spark_version string.)
+      spark_version: 18.3.x-scala2.13
       data_security_mode: SINGLE_USER
       single_user_name: ${workspace.current_user.userName}
       runtime_engine: STANDARD            # Photon off — required by RTM

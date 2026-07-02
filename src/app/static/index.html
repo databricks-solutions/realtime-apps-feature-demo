@@ -32,14 +32,16 @@
    src/notebooks/stream.py
          │
          ▼
-②  ForeachWriter buffers + opens
-   a psycopg connection to Lakebase
-   src/lakebase_sink.py
+②  Native `format("postgresql")` sink
+   buffers up to `batchinterval` (100 ms)
+   or `batchsize` (1000 rows), workspace-
+   managed JDBC connection
+   src/notebooks/stream.py
          │
          ▼
-③  Lakebase commits an INSERT
+③  Lakebase commits an upsert
    into the `events` table
-   src/lakebase_sink.py
+   (INSERT … ON CONFLICT via PRIMARY KEY)
          │
          ▼
 ④  FastAPI's GET /api/events/latest

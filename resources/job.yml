@@ -39,6 +39,9 @@ resources:
               secret_scope: ${var.secret_scope}
               rows_per_second: "500"
               run_duration_seconds: "3600"
-              # Caps Lakebase TX/s at 1000 / sink_max_dwell_ms. See the widget
-              # docstring in stream.py for the rate / dwell trade-off.
-              sink_max_dwell_ms: "10"
+              # Native `format("postgresql")` sink flushes on `batchinterval`
+              # elapsed OR `batchsize` rows (default 1000), whichever hits
+              # first. Must be a Spark interval string using long-form
+              # unit names ("100 milliseconds", not "100" or "100 ms").
+              # See stream.py's widget docstring.
+              sink_batchinterval: "100 milliseconds"

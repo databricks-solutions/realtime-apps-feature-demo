@@ -25,10 +25,9 @@ realtime-app-demo/
 │   ├── job.yml                    # Triggered RTM job (init → stream tasks)
 │   └── app.yml                    # Databricks App + secret bindings
 └── src/
-    ├── lakebase_sink.py           # Streaming ForeachWriter
     ├── notebooks/
-    │   ├── init.py                # Bootstrap: role, table, secrets
-    │   └── stream.py              # Rate → LakebaseSink stream
+    │   ├── init.py                # Bootstrap: role, table, secrets, autovacuum
+    │   └── stream.py              # Rate → RTM → Lakebase native sink
     └── app/                       # FastAPI + static HTML/canvas UI
         ├── main.py
         ├── app.yaml
@@ -136,8 +135,9 @@ To re-run for another hour, just `databricks bundle run rt_demo_job --target dev
 
 Both knobs live in `resources/job.yml` → `tasks[1].notebook_task.base_parameters`:
 
-- `rows_per_second` — 10 is the readable default; 100–1000 still satisfies sub-second lag.
+- `rows_per_second` — 500 by default; 100–1000 still satisfies sub-second lag.
 - `run_duration_seconds` — 3600 (1 h) by default. Set lower for short demos, higher for soaks.
+- `sink_batchinterval` — max buffer hold time for the native sink (default `"100 milliseconds"`). Must be a Spark interval string with long-form unit names (e.g. `"100 milliseconds"`, `"1 second"`) — `"100"` fails with `INVALID_INTERVAL_FORMAT.MISSING_UNIT` and `"100 ms"` fails with `INVALID_INTERVAL_FORMAT.INVALID_UNIT`. Lower = less per-row latency; higher = fewer/larger commits. The sink also flushes at `batchsize` rows (default 1000), whichever hits first.
 
 Edit and redeploy; the next `bundle run rt_demo_job` picks up the new values.
 
@@ -186,12 +186,13 @@ databricks secrets delete-scope realtime-demo
 | Rate source | Synthetic; no external dependency; the `timestamp` field gives us a clean latency reference. |
 | Lakebase Autoscaling | Postgres-compatible, low-latency reads, scales to ~1 CU for the demo. |
 | Triggered job, two tasks (init → stream) | Stream is bounded by `awaitTermination(timeout)`; each run is one hour by default. Init runs once per run and is idempotent. |
-| DBR 17.3 LTS Classic, Photon off, autoscale off | Real-Time Mode requirements. |
+| DBR 18.3 Classic, Photon off, autoscale off | Real-Time Mode requirements + the native `format("postgresql")` sink needs DBR 18.3+. |
 | Bundle-managed All-Purpose cluster, not job cluster | Skips 3–5 min cluster boot per run; cluster autoterminates after 120 min idle. |
-| Password auth via secret scope (not OAuth) | OAuth doesn't survive the executor-side `ForeachWriter` lifecycle. |
-| `INSERT … ON CONFLICT` upsert in the sink | Idempotent restarts — re-processing the same row no-ops. |
-| Plain HTML + canvas (no React/Recharts) | One file, no build step, ~85 lines. |
-| Trigger `realTime="5 minutes"` | "5 minutes" is the checkpoint interval, not how often the trigger fires. RTM runs continuously between checkpoints. |
+| Native `format("postgresql")` streaming sink | Workspace-managed auth (no password on the streaming path), built-in batching, automatic retries on transient JDBC errors, upserts via the table's `PRIMARY KEY`. See the [Lakebase sink page](https://docs.databricks.com/aws/en/structured-streaming/lakebase). |
+| Password auth via secret scope (app only) | Databricks Apps runs in a separate security context and can't inherit workspace OAuth — the FastAPI app uses password auth with a Lakebase role. The streaming path uses workspace-managed OAuth via the native sink. |
+| Aggressive per-table autovacuum on `events` | Across successive runs the rate source resets `startTimeMs` and re-emits the same `id`s, turning INSERTs into hot-key UPDATEs. Autovacuum defaults are far too slow for this pattern — see the `databricks-spark-structured-streaming` skill's Lakebase-sink guidance. |
+| Plain HTML + canvas (no React/Recharts) | One file, no build step. |
+| Trigger `realTime="5 minutes"` | "5 minutes" is the long-running batch duration (sometimes called the checkpoint interval), not how often the trigger fires. RTM runs continuously between checkpoints. |
 
 ## Common issues
 
@@ -202,10 +203,10 @@ databricks secrets delete-scope realtime-demo
 | Init fails: `Provided authentication token is not a valid JWT encoding` connecting to Lakebase | The notebook session token is NOT a valid Lakebase Postgres credential. The notebook mints a short-lived JWT via `POST /api/2.0/postgres/credentials` and uses it as the admin password. |
 | Init fails: `database "<x>" does not exist` | The default Lakebase Autoscaling database is `databricks_postgres` (underscore). Don't override `database_name` unless you've also created that database in Lakebase. |
 | Init fails: `syntax error at or near "$1"` on `CREATE ROLE` | Postgres DDL doesn't accept bind parameters. The notebook inlines the password literal with escaping; don't replace with parameterised execute. |
-| Stream task: `IndentationError: unexpected indent (lakebase_sink.py, line 1)` | `bundle deploy` corrupts the first line of `lakebase_sink.py` if it begins with `"""`. Keep the file starting with a `#` comment line (current code does). |
-| Stream task: `ImportError: cannot import name 'ForeachWriter' from 'pyspark.sql.streaming'` | `ForeachWriter` is a Scala symbol; Python uses duck-typed objects with `open/process/close`. `lakebase_sink.py` already does this; if you re-add the base-class import, this is why it breaks. |
+| Stream task: `Data source postgresql does not support streamed writing` | The workspace's DBR is < 18.3 — the native `format("postgresql")` streaming sink isn't registered. Bump `spark_version` in `resources/cluster.yml` to `18.3.x-scala2.13` or later. |
+| Stream task: `JDBC_STREAMING_SINK_INVALID_OPTIONS` | Typo in an option name passed to the native sink. Recognised options: `endpoint`, `dbtable`, `database`, `upsertkey`, `batchsize`, `batchinterval`, `checkpointLocation`. |
 | Stream is RUNNING but rows have stale timestamps for >60 s | The rate source persists `startTimeMs` in its checkpoint. The notebook clears the checkpoint dir at the top of the stream task; if you change that path, ensure the wipe still runs. |
 | Stream is RUNNING but no rows in `events` for >60 s | Probably an orphan stream from a previous run holding the checkpoint lock on the shared cluster. Cancel the active job run, restart the cluster from the Compute UI (or `databricks clusters restart <id>`), and trigger a fresh `bundle run rt_demo_job`. |
 | App KPI tile says `stream stopped` | The freshest event in Postgres is more than 5 s old — usually means the job's `run_duration_seconds` elapsed. Trigger another run. |
 | App page is stuck on `—` | Env vars haven't picked up the rotated secrets (true after the very first bundle deploy + run). Run `databricks apps stop && databricks apps start realtime-demo`. |
-| Lag display is > 1 s | Check the cluster: DBR ≥ 17.3 LTS, Photon off, autoscale off, ≥ 1 worker, `realTimeMode.enabled=true`, `sortBeforeRepartition=false`, trigger is `realTime="5 minutes"` (not `processingTime`). |
+| Lag display is > 1 s | Check the cluster: DBR ≥ 18.3 (native sink requires it), Photon off, autoscale off, ≥ 1 worker, `realTimeMode.enabled=true`, `sortBeforeRepartition=false`, trigger is `realTime="5 minutes"` (not `processingTime`). |

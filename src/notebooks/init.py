@@ -5,7 +5,9 @@
 # MAGIC Idempotent one-shot task that prepares Lakebase for the `stream` task:
 # MAGIC resolves the Lakebase endpoint, mints an admin Postgres credential,
 # MAGIC creates (or rotates) the demo role, ensures the `events` table + index
-# MAGIC exist, and writes the four connection secrets to the secret scope.
+# MAGIC exist with hot-upsert autovacuum tuning, and writes the five
+# MAGIC connection secrets (host, db, user, password, endpoint) to the
+# MAGIC secret scope.
 
 # COMMAND ----------
 
@@ -128,22 +130,46 @@ with psycopg.connect(
         );
         GRANT ALL ON TABLE events TO "{role}";
         CREATE INDEX IF NOT EXISTS events_ts_idx ON events (timestamp DESC);
+        -- Aggressive per-table autovacuum: this table is a hot-key-upsert
+        -- workload across successive demo runs (rate source resets its
+        -- `startTimeMs` each run, so `id`s collide with prior-run rows and
+        -- every subsequent row is an UPDATE). Postgres defaults wait for
+        -- 20% of the table to churn before autovacuuming, which is far
+        -- too slow here; without this the table bloats and both the sink
+        -- and the app's reads slow down. Guidance from the shipping
+        -- `databricks-spark-structured-streaming` skill.
+        ALTER TABLE events SET (
+            autovacuum_vacuum_scale_factor = 0,
+            autovacuum_vacuum_threshold    = 200,
+            autovacuum_vacuum_cost_delay   = 0
+        );
     """)
-print(f"Role {role} ready; events table + index ready.")
+print(f"Role {role} ready; events table + index ready; autovacuum tuned.")
 
 # COMMAND ----------
 
 # MAGIC %md ## 6. Refresh connection secrets
 # MAGIC
-# MAGIC The `stream` task and the FastAPI app both read these four keys from
-# MAGIC the secret scope to connect with Postgres password auth.
+# MAGIC The FastAPI app reads `lakebase_host` / `_db` / `_user` / `_password`
+# MAGIC to connect via Postgres password auth. The `stream` task uses the
+# MAGIC native `format("postgresql")` sink, which authenticates via the
+# MAGIC query-runner's workspace identity — it only needs the fifth key,
+# MAGIC `lakebase_endpoint`, in `project_id.branch_id` shorthand.
 
 # COMMAND ----------
 
 scope = p["secret_scope"]
+# `lakebase_endpoint` in `<project_id>.<branch_id>` shorthand form is what
+# the native `format("postgresql")` streaming sink expects for its
+# `endpoint` option in the explicit-endpoint form. The stream task reads
+# this and passes it through; the FastAPI app uses the other four keys
+# for its psycopg password-auth connection (Databricks Apps runs in a
+# separate security context and can't inherit workspace OAuth).
+lakebase_endpoint = f"{p['project_id']}.{p['branch_name']}"
 for key, val in [("lakebase_host",     lakebase_host),
                  ("lakebase_db",       db),
                  ("lakebase_user",     role),
-                 ("lakebase_password", p["pg_password"])]:
+                 ("lakebase_password", p["pg_password"]),
+                 ("lakebase_endpoint", lakebase_endpoint)]:
     post("/api/2.0/secrets/put", {"scope": scope, "key": key, "string_value": val})
-print(f"Wrote 4 secrets to scope `{scope}`.")
+print(f"Wrote 5 secrets to scope `{scope}`.")

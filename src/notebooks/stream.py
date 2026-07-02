@@ -2,17 +2,14 @@
 # MAGIC %md
 # MAGIC # Realtime demo — stream
 # MAGIC
-# MAGIC Rate source → Real-Time Mode → Lakebase via `LakebaseSink`. Runs for
+# MAGIC Rate source → Real-Time Mode → Lakebase via the native
+# MAGIC `format("postgresql")` sink (Public Preview, DBR 18.3+). Runs for
 # MAGIC `run_duration_seconds` (default 1 h) then stops cleanly. Depends on
-# MAGIC the `init` task to have prepared the role, table, and secret scope.
-
-# COMMAND ----------
-
-# MAGIC %md ## Install dependencies
-
-# COMMAND ----------
-
-# MAGIC %pip install --quiet "psycopg[binary]>=3.1"
+# MAGIC the `init` task to have prepared the endpoint, role, and secrets.
+# MAGIC
+# MAGIC Reference: `lakebase-sink-python.md` in the
+# MAGIC [databricks-agent-skills](https://github.com/databricks/databricks-agent-skills)
+# MAGIC `databricks-spark-structured-streaming` skill.
 
 # COMMAND ----------
 
@@ -24,40 +21,27 @@ dbutils.widgets.text("checkpoint_path", "")
 dbutils.widgets.text("secret_scope", "realtime-demo")
 dbutils.widgets.text("rows_per_second", "500")
 dbutils.widgets.text("run_duration_seconds", "3600")
-# sink_max_dwell_ms throttles the LakebaseSink so a single connection can't
-# saturate Postgres with too many per-row commits (Lakebase tops out around
-# 100 TX/s per connection at 1 CU). Rows accumulate in memory and the sink
-# commits the whole buffer only after `sink_max_dwell_ms` has elapsed since
-# the previous commit — capping Lakebase TX/s at `1000 / sink_max_dwell_ms`
-# while batch size grows with the source rate. Default 10 ms (≤100 TX/s)
-# sits right at the 1 CU ceiling — ideal at ~1000 rps where ~10 rows batch
-# per commit. Raise it (e.g. 100 ms → ≤10 TX/s) for headroom at lower rates.
-dbutils.widgets.text("sink_max_dwell_ms", "10")
+# `batchinterval` is the native sink's max buffer hold time before
+# flushing. Lower = lower per-row latency; higher = fewer/larger commits.
+# Default is 100 milliseconds per docs. The sink also flushes when
+# `batchsize` rows accumulate (default 1000), whichever comes first.
+#
+# Format: Spark interval string with long-form unit names —
+# `"100 milliseconds"`, `"1 second"`, etc. NOT `"100"` (fails with
+# INVALID_INTERVAL_FORMAT.MISSING_UNIT) and NOT `"100 ms"` (fails with
+# INVALID_INTERVAL_FORMAT.INVALID_UNIT — the parser doesn't accept the
+# `ms` abbreviation, only `milliseconds` / `millisecond` / `millis`).
+dbutils.widgets.text("sink_batchinterval", "100 milliseconds")
 
-checkpoint_path   = dbutils.widgets.get("checkpoint_path")
-scope             = dbutils.widgets.get("secret_scope")
-rows_per_second   = int(dbutils.widgets.get("rows_per_second"))
-duration          = int(dbutils.widgets.get("run_duration_seconds"))
-sink_max_dwell_ms = int(dbutils.widgets.get("sink_max_dwell_ms"))
-
-# COMMAND ----------
-
-# MAGIC %md ## 2. Import the `LakebaseSink`
-# MAGIC
-# MAGIC The sink lives in `src/lakebase_sink.py` next to the notebook
-# MAGIC directory. Add the workspace path of its parent to `sys.path` so the
-# MAGIC notebook can import it like a regular module.
+checkpoint_path    = dbutils.widgets.get("checkpoint_path")
+scope              = dbutils.widgets.get("secret_scope")
+rows_per_second    = int(dbutils.widgets.get("rows_per_second"))
+duration           = int(dbutils.widgets.get("run_duration_seconds"))
+sink_batchinterval = dbutils.widgets.get("sink_batchinterval")
 
 # COMMAND ----------
 
-import os, sys
-notebook_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
-sys.path.insert(0, "/Workspace" + os.path.dirname(os.path.dirname(notebook_path)))
-from lakebase_sink import LakebaseSink
-
-# COMMAND ----------
-
-# MAGIC %md ## 3. Clean up state from any prior run
+# MAGIC %md ## 2. Clean up state from any prior run
 # MAGIC
 # MAGIC With `existing_cluster_id` the Spark session is shared across job
 # MAGIC runs; a cancelled run can leave its stream(s) active and holding the
@@ -82,35 +66,23 @@ except Exception as e:
 
 # COMMAND ----------
 
-# MAGIC %md ## 4. Build the `LakebaseSink`
+# MAGIC %md ## 3. Start the Real-Time Mode stream
 # MAGIC
-# MAGIC Reads the Lakebase connection details written by the `init` task and
-# MAGIC connects via Postgres password auth — executor-side custom sinks
-# MAGIC can't use OAuth.
-
-# COMMAND ----------
-
-sink = LakebaseSink(
-    host=dbutils.secrets.get(scope, "lakebase_host"),
-    database=dbutils.secrets.get(scope, "lakebase_db"),
-    user=dbutils.secrets.get(scope, "lakebase_user"),
-    password=dbutils.secrets.get(scope, "lakebase_password"),
-    table="events",
-    key_col="id",
-    max_dwell_ms=sink_max_dwell_ms,
-)
-
-# COMMAND ----------
-
-# MAGIC %md ## 5. Start the Real-Time Mode stream
+# MAGIC `.trigger(realTime="5 minutes")` enables Real-Time Mode. The
+# MAGIC `"5 minutes"` is the long-running batch duration (sometimes called
+# MAGIC the checkpoint interval) — RTM runs continuously between checkpoints.
 # MAGIC
-# MAGIC `.trigger(realTime="5 minutes")` enables Real-Time Mode; the
-# MAGIC `"5 minutes"` is the *checkpoint interval*, not how often the trigger
-# MAGIC fires. RTM runs continuously between checkpoints.
+# MAGIC The native `format("postgresql")` sink handles connection management,
+# MAGIC batching, and automatic retries on transient JDBC errors. Auth is
+# MAGIC workspace-managed via the query runner's identity — no password
+# MAGIC needed on this path. `endpoint` is written by the `init` task to
+# MAGIC `secret_scope/lakebase_endpoint` in `project_id.branch_id` shorthand.
 
 # COMMAND ----------
 
 from pyspark.sql.functions import col, rand
+
+endpoint = dbutils.secrets.get(scope, "lakebase_endpoint")
 
 stream = (
     spark.readStream
@@ -120,7 +92,10 @@ stream = (
         .load()
         .select(col("value").alias("id"), col("timestamp"), rand().alias("metric"))
         .writeStream
-        .foreach(sink)
+        .format("postgresql")
+        .option("endpoint", endpoint)
+        .option("dbtable", "events")
+        .option("batchinterval", sink_batchinterval)
         .outputMode("update")
         .option("checkpointLocation", checkpoint_path)
         .trigger(realTime="5 minutes")
@@ -129,10 +104,9 @@ stream = (
 
 # COMMAND ----------
 
-# MAGIC %md ## 6. Run for the bounded duration, then stop cleanly
+# MAGIC %md ## 4. Run for the bounded duration, then stop cleanly
 # MAGIC
-# MAGIC `stream.stop()` drains the sink via its `close()` method so any
-# MAGIC buffered rows commit before exit.
+# MAGIC `stream.stop()` flushes any pending sink buffer before exit.
 
 # COMMAND ----------
 

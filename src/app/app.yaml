@@ -4,7 +4,7 @@ env:
   - name: LAKEBASE_HOST
     valueFrom: lakebase-host
   - name: LAKEBASE_DB
-    valueFrom: lakebase-db-name
+    valueFrom: lakebase-db
   - name: LAKEBASE_USER
     valueFrom: lakebase-user
   - name: LAKEBASE_PASSWORD
