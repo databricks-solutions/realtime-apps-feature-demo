@@ -256,7 +256,7 @@ Transitive dependencies are checked for known vulnerabilities in CI with `pip-au
 
 ## Maintenance and contribution
 
-- Changes must arrive through a pull request; `main` is protected and requires review and the `quality` check.
+- Changes must arrive through a pull request; `main` is protected and requires review. The `quality` workflow must also pass once GitHub Actions is enabled for this repository by the organization.
 - A Databricks L7+ reviewer must participate in the initial publication review. Maintainers must record the approved reviewer in the PR.
 - Validate the demo against a currently supported DBR and its documented classic-compute exception at least every six months.
 - External contributions are not accepted directly. Open an issue so a Databricks maintainer can evaluate and reproduce the change.
