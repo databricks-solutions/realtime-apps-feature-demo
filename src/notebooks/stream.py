@@ -2,6 +2,9 @@
 # MAGIC %md
 # MAGIC # Realtime demo — stream
 # MAGIC
+# MAGIC **Business outcome:** deliver synthetic grid telemetry to an operator-facing
+# MAGIC app in under 500 ms, illustrating faster awareness of emerging conditions.
+# MAGIC
 # MAGIC Rate source → Real-Time Mode → Lakebase via the native
 # MAGIC `format("postgresql")` sink (Public Preview, DBR 18.3+). Runs for
 # MAGIC `run_duration_seconds` (default 1 h) then stops cleanly. Depends on

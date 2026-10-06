@@ -2,6 +2,10 @@
 # MAGIC %md
 # MAGIC # Realtime demo — bootstrap
 # MAGIC
+# MAGIC **Persona:** a grid operations engineer needs a live view of synthetic
+# MAGIC feeder telemetry so changing conditions can be investigated quickly.
+# MAGIC This bootstrap task prepares the operational serving layer for that view.
+# MAGIC
 # MAGIC Idempotent one-shot task that prepares Lakebase for the `stream` task:
 # MAGIC resolves the Lakebase endpoint, mints an admin Postgres credential,
 # MAGIC creates (or rotates) the demo role, ensures the `events` table + index
@@ -15,7 +19,7 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install --quiet "psycopg[binary]>=3.1"
+# MAGIC %pip install --quiet "pg8000==1.31.2"
 
 # COMMAND ----------
 
@@ -31,12 +35,21 @@ DEFAULTS = {
     "branch_name": "production",
     "database_name": "databricks_postgres",
     "pg_role": "demo_writer",
-    "pg_password": "demo-password-please-rotate",
+    "pg_password": "",
     "secret_scope": "realtime-demo",
 }
 for k, v in DEFAULTS.items():
     dbutils.widgets.text(k, v)
 p = {k: dbutils.widgets.get(k) for k in DEFAULTS}
+
+if len(p["pg_password"]) < 24:
+    raise ValueError("pg_password must be supplied and contain at least 24 characters")
+
+import re
+
+for field in ("project_id", "branch_name", "database_name", "pg_role", "secret_scope"):
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,62}", p[field]):
+        raise ValueError(f"Invalid {field}: expected a simple identifier, got {p[field]!r}")
 
 # COMMAND ----------
 
@@ -50,7 +63,7 @@ p = {k: dbutils.widgets.get(k) for k in DEFAULTS}
 
 import requests
 from databricks.sdk import WorkspaceClient
-import psycopg
+from pg8000 import dbapi
 
 w = WorkspaceClient()
 ctx = dbutils.notebook.entry_point.getDbutils().notebook().getContext()
@@ -108,15 +121,17 @@ admin_pg_token = post("/api/2.0/postgres/credentials", {"endpoint": endpoint_nam
 
 # COMMAND ----------
 
-pw_lit = "'" + p["pg_password"].replace("'", "''") + "'"
 role   = p["pg_role"]
 db     = p["database_name"]
+pw_lit = "'" + p["pg_password"].replace("'", "''") + "'"
 
-with psycopg.connect(
-    host=lakebase_host, port=5432, dbname=db,
+with dbapi.connect(
+    host=lakebase_host, port=5432, database=db,
     user=w.current_user.me().user_name, password=admin_pg_token,
-    sslmode="require", autocommit=True,
-) as conn, conn.cursor() as cur:
+    ssl_context=True,
+) as conn:
+    conn.autocommit = True
+    cur = conn.cursor()
     cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
     verb = "ALTER" if cur.fetchone() else "CREATE"
     cur.execute(f'{verb} ROLE "{role}" WITH LOGIN PASSWORD {pw_lit}')
@@ -163,7 +178,7 @@ scope = p["secret_scope"]
 # the native `format("postgresql")` streaming sink expects for its
 # `endpoint` option in the explicit-endpoint form. The stream task reads
 # this and passes it through; the FastAPI app uses the other four keys
-# for its psycopg password-auth connection (Databricks Apps runs in a
+# for its asyncpg password-auth connection (Databricks Apps runs in a
 # separate security context and can't inherit workspace OAuth).
 lakebase_endpoint = f"{p['project_id']}.{p['branch_name']}"
 for key, val in [("lakebase_host",     lakebase_host),

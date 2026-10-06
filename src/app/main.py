@@ -1,9 +1,9 @@
 """
 Realtime demo backend.
 
-FastAPI in front of Lakebase Postgres. Serves the latest N events for the React
+FastAPI in front of Lakebase Postgres. Serves the latest N events for the HTML
 UI to poll at ~100 ms. Per the skill's app-backend.md:
-- AsyncConnectionPool at startup (not per-request connections).
+- asyncpg pool at startup (not per-request connections).
 - Tiny payload — only the columns the UI renders, plus a server timestamp the
   frontend uses to show end-to-end lag.
 """
@@ -13,34 +13,25 @@ from __future__ import annotations
 import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, Request
+import asyncpg
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.staticfiles import StaticFiles
-from psycopg.rows import dict_row
-from psycopg_pool import AsyncConnectionPool
-
-
-def conninfo() -> str:
-    return (
-        f"host={os.environ['LAKEBASE_HOST']} "
-        f"port={os.environ.get('LAKEBASE_PORT', '5432')} "
-        f"dbname={os.environ['LAKEBASE_DB']} "
-        f"user={os.environ['LAKEBASE_USER']} "
-        f"password={os.environ['LAKEBASE_PASSWORD']} "
-        f"sslmode=require"
-    )
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    app.state.pool = AsyncConnectionPool(
-        conninfo=conninfo(),
+    app.state.pool = await asyncpg.create_pool(
+        host=os.environ["LAKEBASE_HOST"],
+        port=int(os.environ.get("LAKEBASE_PORT", "5432")),
+        database=os.environ["LAKEBASE_DB"],
+        user=os.environ["LAKEBASE_USER"],
+        password=os.environ["LAKEBASE_PASSWORD"],
+        ssl="require",
         min_size=2,
         max_size=10,
-        kwargs={"row_factory": dict_row},
-        open=False,
     )
-    await app.state.pool.open()
     try:
         yield
     finally:
@@ -50,22 +41,22 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 
-async def get_pool(request: Request) -> AsyncConnectionPool:
+async def get_pool(request: Request) -> asyncpg.Pool:
     return request.app.state.pool
 
 
 @app.get("/api/events/latest")
 async def latest_events(
-    limit: int = 50,
-    pool: AsyncConnectionPool = Depends(get_pool),
+    limit: int = Query(default=50, ge=1, le=250),
+    pool: asyncpg.Pool = Depends(get_pool),
 ):
-    async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(
+    async with pool.acquire() as conn:
+        records = await conn.fetch(
             "SELECT id, timestamp, metric FROM events "
-            "ORDER BY timestamp DESC LIMIT %s",
-            (limit,),
+            "ORDER BY timestamp DESC LIMIT $1",
+            limit,
         )
-        rows = await cur.fetchall()
+    rows = [dict(record) for record in records]
 
     # Serialize timestamps to ISO with timezone so the frontend can compute lag.
     for r in rows:
@@ -83,4 +74,4 @@ def _now_iso() -> str:
 
 
 # Static SPA — must mount AFTER routes so /api/* takes precedence.
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+app.mount("/", StaticFiles(directory=Path(__file__).parent / "static", html=True), name="static")

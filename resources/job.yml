@@ -1,5 +1,21 @@
 resources:
   jobs:
+    rt_demo_setup_job:
+      name: realtime-demo-setup
+      max_concurrent_runs: 1
+      tasks:
+        - task_key: init
+          existing_cluster_id: ${resources.clusters.rt_demo_cluster.id}
+          notebook_task:
+            notebook_path: ../src/notebooks/init.py
+            base_parameters:
+              project_id: ${var.project_id}
+              branch_name: ${var.branch_name}
+              database_name: ${var.database_name}
+              pg_role: ${var.pg_role}
+              pg_password: ${var.pg_password}
+              secret_scope: ${var.secret_scope}
+
     rt_demo_job:
       name: realtime-demo
       max_concurrent_runs: 1

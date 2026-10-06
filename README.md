@@ -1,6 +1,14 @@
-# Realtime App Demo
+# Grid Operations Realtime App
 
-End-to-end realtime demo on Databricks:
+## The customer story
+
+A grid operations engineer needs to see changing feeder conditions quickly enough to investigate an emerging overload before it becomes an outage. Traditional dashboards refresh after seconds or minutes; this demo shows how Databricks can move operational telemetry from Spark Structured Streaming into Lakebase and a custom Databricks App in under 500 ms.
+
+The included data is synthetic and represents normalized grid telemetry. The application-first outcome is a live operator view; the streaming and serving components underneath demonstrate how Databricks combines realtime processing, operational storage, governance, and application delivery on one platform.
+
+## What the solution does
+
+End-to-end flow:
 
 ```
 rate source ──▶ Structured Streaming (Real-Time Mode) ──▶ Lakebase Postgres
@@ -12,7 +20,15 @@ rate source ──▶ Structured Streaming (Real-Time Mode) ──▶ Lakebase P
                                                        Browser polling at 100 ms
 ```
 
-Goal: demonstrate sub-second pipeline latency from a row being emitted by Spark to it being returned by the API. Measured on a typical AWS workspace with the default settings, **ingest → serve** lands around **130–200 ms**.
+Success means **telemetry ingest → operator view remains below 500 ms**. In a representative AWS test workspace, the default settings measured approximately 130–200 ms. Treat those figures as illustrative, not a performance guarantee; cloud, region, workspace, and workload affect results.
+
+## Why Databricks
+
+- Real-Time Mode processes telemetry with sub-second latency.
+- The native Lakebase sink provides managed authentication, batching, retry, and idempotent upserts.
+- Lakebase serves operational reads to a Databricks App without adding an external database platform.
+- Unity Catalog governs persistent checkpoints and supporting data assets.
+- Declarative Automation Bundles make the environment repeatable and reviewable.
 
 ## Layout
 
@@ -46,9 +62,21 @@ The target workspace must satisfy all of the following:
 
 Cost note: Lakebase Autoscaling with `no_suspension: true` is billed continuously (the smallest setting, 0.5–1 CU, is about $0.50/h). The All-Purpose cluster the bundle creates (`m5d.large` × 2 on AWS) is about $0.30/h while running; it autoterminates after 120 min idle. Tear down when you're done — see "Tear down" below.
 
+### Classic-compute exception
+
+This asset intentionally does **not** run the streaming task on Serverless. The native Lakebase Structured Streaming sink is Public Preview and requires DBR 18.3+ on classic compute; Serverless and Lakeflow Spark Declarative Pipelines are not supported for this sink. The Databricks App and Lakebase remain managed/serverless services. Reassess this exception whenever the sink's support matrix changes, and archive or update the repository if it is no longer current.
+
 ## Configure for your workspace
 
-The bundle is workspace-agnostic but ships with placeholders. Make these edits before your first deploy:
+The bundle is workspace-agnostic. The supported deployment path generates a unique password, seeds the required secret bindings, validates the bundle strictly, runs the short setup job, deploys the App, and starts the bounded realtime job without waiting for its one-hour run to finish:
+
+```bash
+./scripts/deploy.sh <your-profile-name> [catalog]
+```
+
+Requirements: Databricks CLI, `jq`, and `openssl`. The script always requires an explicit CLI profile and never stores the generated password in Git or prints it to the terminal.
+
+The manual steps below explain what the script does and support troubleshooting.
 
 ### 1. CLI profile
 
@@ -71,7 +99,7 @@ The bundle creates the All-Purpose cluster automatically — no manual step on A
 - **Azure**: replace `aws_attributes` with `azure_attributes: { availability: ON_DEMAND_AZURE }` and change `node_type_id`/`driver_node_type_id` to e.g. `Standard_D4ds_v5`.
 - **GCP**: replace `aws_attributes` with `gcp_attributes: { use_preemptible_executors: false }` and use e.g. `n2-standard-4`.
 
-### 4. Pre-seed the secret scope
+### 4. Pre-seed the secret scope (manual deployment only)
 
 The App resource validates that the four secret-binding keys exist at deploy time; the `init` notebook later rotates them to real values on first run.
 
@@ -84,13 +112,13 @@ done
 
 Override `realtime-demo` if you renamed the `secret_scope` variable.
 
-### 5. (Optional) Override the demo Postgres password
-
-The default password literal is `demo-password-please-rotate`. For a real deployment, override it:
+### 5. Generate a Postgres password (required for manual deployment)
 
 ```bash
 export BUNDLE_VAR_pg_password=$(openssl rand -hex 24)
 ```
+
+The bundle has no password default. Bundle validation fails if it is omitted, and the bootstrap task fails before making changes if it is shorter than 24 characters.
 
 ## Deploy
 
@@ -106,7 +134,7 @@ Then:
 
 ```bash
 cd realtime-app-demo
-databricks bundle validate --target dev
+databricks bundle validate --strict --target dev
 databricks bundle deploy   --target dev
 
 # Deploy the app's source code. First time only — subsequent `bundle deploy`s
@@ -148,15 +176,15 @@ Edit and redeploy; the next `bundle run rt_demo_job` picks up the new values.
 3. **Job run is healthy** — Workflows ▸ `realtime-demo` ▸ latest run: `init` SUCCESS, `stream` RUNNING (and will stay RUNNING for `run_duration_seconds` before terminating cleanly).
 4. **Rows are landing** — from any notebook attached to the cluster:
    ```python
-   import psycopg
+   from pg8000 import dbapi
    token = dbutils.secrets.get("realtime-demo", "lakebase_password")
-   conn = psycopg.connect(
+   conn = dbapi.connect(
        host=dbutils.secrets.get("realtime-demo", "lakebase_host"),
        port=5432,
-       dbname=dbutils.secrets.get("realtime-demo", "lakebase_db"),
+       database=dbutils.secrets.get("realtime-demo", "lakebase_db"),
        user=dbutils.secrets.get("realtime-demo", "lakebase_user"),
        password=token,
-       sslmode="require",
+       ssl_context=True,
    )
    cur = conn.cursor()
    cur.execute("SELECT count(*), max(timestamp) FROM events")
@@ -210,3 +238,25 @@ databricks secrets delete-scope realtime-demo
 | App KPI tile says `stream stopped` | The freshest event in Postgres is more than 5 s old — usually means the job's `run_duration_seconds` elapsed. Trigger another run. |
 | App page is stuck on `—` | Env vars haven't picked up the rotated secrets (true after the very first bundle deploy + run). Run `databricks apps stop && databricks apps start realtime-demo`. |
 | Lag display is > 1 s | Check the cluster: DBR ≥ 18.3 (native sink requires it), Photon off, autoscale off, ≥ 1 worker, `realTimeMode.enabled=true`, `sortBeforeRepartition=false`, trigger is `realTime="5 minutes"` (not `processingTime`). |
+
+## Dependencies and licenses
+
+Only permissive dependencies allowed by the public-content policy are used directly.
+
+| Library | Purpose | License | Source |
+|---|---|---|---|
+| FastAPI | App API | MIT | https://github.com/fastapi/fastapi |
+| Uvicorn | ASGI server | BSD-3-Clause | https://github.com/encode/uvicorn |
+| asyncpg | Async PostgreSQL client for the App | Apache-2.0 | https://github.com/MagicStack/asyncpg |
+| pg8000 | PostgreSQL client for bootstrap notebook | BSD-3-Clause | https://github.com/tlocke/pg8000 |
+| Databricks SDK for Python | Workspace identity and API client | Apache-2.0 | https://github.com/databricks/databricks-sdk-py |
+| Requests | HTTPS calls from the bootstrap notebook | Apache-2.0 | https://github.com/psf/requests |
+
+Transitive dependencies are checked for known vulnerabilities in CI with `pip-audit`. Any dependency change must update this table and receive license review before merge.
+
+## Maintenance and contribution
+
+- Changes must arrive through a pull request; `main` is protected and requires review and the `quality` check.
+- A Databricks L7+ reviewer must participate in the initial publication review. Maintainers must record the approved reviewer in the PR.
+- Validate the demo against a currently supported DBR and its documented classic-compute exception at least every six months.
+- External contributions are not accepted directly. Open an issue so a Databricks maintainer can evaluate and reproduce the change.
