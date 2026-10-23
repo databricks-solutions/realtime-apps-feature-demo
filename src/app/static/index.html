@@ -1,5 +1,5 @@
 <!doctype html>
-<title>Realtime Demo</title>
+<title>Grid Operations Live Telemetry</title>
 <style>
   body { font: 14px system-ui; margin: 24px; max-width: 900px }
   h1 { font-size: 20px; margin: 0 0 4px }
@@ -9,21 +9,25 @@
   .kpi b { font-size: 24px; font-variant-numeric: tabular-nums }
   canvas { display: block; width: 100%; height: 240px; margin-top: 20px }
   .explainer { color: #444; font-size: 13px }
+  .status { margin: 12px 0; padding: 10px 12px; background: #f6f7f9; border-radius: 4px }
+  .error { color: #b42318; background: #fef3f2 }
   .explainer code, .explainer pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace }
   .explainer code { font-size: 12px; background: #f0f1f4; padding: 1px 4px; border-radius: 3px }
   .explainer pre { font-size: 12px; line-height: 1.5; background: #f6f7f9; padding: 14px;
                    margin: 12px 0; overflow-x: auto }
 </style>
 
-<h1>Realtime Demo</h1>
-<p class="sub">Rate source → RTM → Lakebase → FastAPI → browser. Polls 100 ms; chart 1 s.</p>
+<h1>Grid telemetry reaches operators in under 500 ms</h1>
+<p class="sub">For grid operations engineers monitoring fast-changing feeder load. Databricks Real-Time Mode writes operational telemetry to Lakebase, where a Databricks App serves it immediately.</p>
 
 <!-- HTML5 exposes elements with `id` as globals (`ingest`, `chart`). -->
-<div class="kpi">Ingest → serve: <b id="ingest">—</b></div>
+<div class="kpi">Telemetry ingest → operator view: <b id="ingest">—</b></div>
+<div id="telemetry-status" class="status">Connecting to live telemetry…</div>
 <canvas id="chart"></canvas>
 
 <section class="explainer">
   <h2>What this measures</h2>
+  <p>This synthetic, dataset-free scenario represents a utility deciding whether streaming telemetry can support time-sensitive operational applications. The target is under 500 ms so operators see changing conditions quickly enough to investigate and act.</p>
   <p><b>Ingest → serve latency</b> = <code>server_ts − event.timestamp</code> — the time from
      Spark's rate source emitting a row to the FastAPI backend returning it from Lakebase.
      Each step in the path contributes to the number you see in the KPI tile:</p>
@@ -67,6 +71,7 @@
 
   // Resize the canvas's backing store to match its CSS box (called on resize).
   const ctx = chart.getContext('2d');
+  const telemetryStatus = document.getElementById('telemetry-status');
   function fit() { chart.width = chart.clientWidth; chart.height = chart.clientHeight; }
   onresize = fit; fit();
 
@@ -86,9 +91,14 @@
   async function poll() {
     try {
       const r = await fetch('/api/events/latest?limit=' + LIMIT);
-      if (!r.ok) return;
+      if (!r.ok) throw new Error('API returned ' + r.status);
       data = await r.json();
-      if (!data.events?.length) return;
+      telemetryStatus.className = 'status';
+      if (!data.events?.length) {
+        telemetryStatus.textContent = 'No telemetry yet. Start the realtime job to populate this view.';
+        return;
+      }
+      telemetryStatus.textContent = 'Live • source: synthetic grid telemetry • refreshed ' + new Date().toLocaleTimeString();
       const t = Date.now();
       const srv = +new Date(data.server_ts);
       const newestId = data.events[0].id;
@@ -106,7 +116,10 @@
       }
       lastSeenId = Math.max(lastSeenId, newestId);
       while (samples.length && t - samples[0].t > WIN) samples.shift();
-    } catch {}            // network blip; next tick retries
+    } catch (error) {
+      telemetryStatus.className = 'status error';
+      telemetryStatus.textContent = 'Telemetry is temporarily unavailable. Retrying automatically.';
+    }
   }
 
   // redraw: bin samples (not events) into wall-clock-aligned 1 s buckets and

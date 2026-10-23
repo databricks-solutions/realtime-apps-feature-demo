@@ -1,0 +1,32 @@
+name: quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install application and quality dependencies
+        run: uv pip install --system -r src/app/requirements.txt pytest ruff pip-audit
+      - name: Lint
+        run: ruff check src/app tests
+      - name: Test
+        run: pytest -q
+      - name: Audit dependencies
+        run: pip-audit -r src/app/requirements.txt
+      - name: Reject credentials and private keys
+        run: |
+          if rg -n '(BEGIN [A-Z ]*PRIVATE KEY|AKIA[0-9A-Z]{16}|gh[opsu]_[A-Za-z0-9]{30,}|dapi[0-9a-f]{32})' --glob '!*.md' .; then
+            echo 'Potential credential detected'
+            exit 1
+          fi

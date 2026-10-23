@@ -18,8 +18,7 @@ variables:
     description: Postgres role used by both the streaming sink and the FastAPI app.
     default: demo_writer
   pg_password:
-    description: Password for `pg_role`. Override with `--var pg_password=…` for real deployments.
-    default: demo-password-please-rotate
+    description: Strong password for `pg_role`. Required; generate a unique value for every deployment.
   secret_scope:
     description: Databricks secret scope holding Lakebase connection credentials.
     default: realtime-demo

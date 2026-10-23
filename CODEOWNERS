@@ -1,0 +1,3 @@
+# Repository-wide technical owner. Add the designated L7+ reviewer or team
+# before publication; branch protection separately enforces approval.
+* @dan-keeling-databricks

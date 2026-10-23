@@ -2,7 +2,7 @@ resources:
   apps:
     rt_demo_app:
       name: realtime-demo
-      description: Realtime app demo — FastAPI + React polling at 100ms against Lakebase.
+      description: Grid operations telemetry — FastAPI + HTML polling at 100ms against Lakebase.
       source_code_path: ../src/app
       resources:
         - name: lakebase-host
