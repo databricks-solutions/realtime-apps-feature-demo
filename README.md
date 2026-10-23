@@ -1,11 +1,5 @@
 # Grid Operations Realtime App
 
-## The customer story
-
-A grid operations engineer needs to see changing feeder conditions quickly enough to investigate an emerging overload before it becomes an outage. Traditional dashboards refresh after seconds or minutes; this demo shows how Databricks can move operational telemetry from Spark Structured Streaming into Lakebase and a custom Databricks App in under 500 ms.
-
-The included data is synthetic and represents normalized grid telemetry. The application-first outcome is a live operator view; the streaming and serving components underneath demonstrate how Databricks combines realtime processing, operational storage, governance, and application delivery on one platform.
-
 ## What the solution does
 
 End-to-end flow:
