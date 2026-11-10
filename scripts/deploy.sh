@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [[ $# -lt 1 || $# -gt 2 ]]; then
-  echo "Usage: $0 <databricks-profile> [catalog]" >&2
+if [[ $# -lt 1 || $# -gt 3 ]]; then
+  echo "Usage: $0 <databricks-profile> [catalog] [target: dev|prod]" >&2
   exit 2
 fi
 
 profile=$1
 catalog=${2:-main}
+target=${3:-dev}
 scope=realtime-demo
-password=$(openssl rand -hex 24)
 
+# The init job writes the `lakebase_endpoint` secret here. The app binds no
+# secrets (it uses OAuth), so there are no keys to pre-seed. `list-scopes`
+# output is a bare array or `{"scopes": [...]}` depending on CLI version.
 if ! databricks secrets list-scopes --profile "$profile" -o json \
-  | jq -e --arg scope "$scope" '.scopes[]? | select(.name == $scope)' >/dev/null; then
+  | jq -e --arg scope "$scope" '(.scopes? // .)[]? | select(.name == $scope)' >/dev/null; then
   databricks secrets create-scope "$scope" --profile "$profile"
 fi
 
-for key in lakebase_host lakebase_db lakebase_user lakebase_password; do
-  printf '%s' placeholder | databricks secrets put-secret "$scope" "$key" --profile "$profile"
-done
-
 export BUNDLE_VAR_catalog=$catalog
-export BUNDLE_VAR_pg_password=$password
 
-databricks bundle validate --strict --target dev --profile "$profile"
-databricks bundle deploy --target dev --profile "$profile"
-databricks bundle run rt_demo_setup_job --target dev --profile "$profile"
-databricks bundle run rt_demo_app --target dev --profile "$profile"
-databricks bundle run rt_demo_job --target dev --no-wait --profile "$profile"
+databricks bundle validate --strict --target "$target" --profile "$profile"
+# Deploys the Lakebase project, checkpoint volume, both jobs, and the app. The
+# continuous stream job starts right away and retries until init has run.
+databricks bundle deploy --target "$target" --profile "$profile"
+# One-time, idempotent setup: events table, autovacuum, app SP grant, secret.
+databricks bundle run rt_demo_init_job --target "$target" --profile "$profile"
+databricks bundle run rt_demo_app --target "$target" --profile "$profile"
 
-echo "Deployment complete and the realtime job has started."
-echo "The generated database password was stored in secret scope '$scope'."
+echo "Deployment complete. The continuous realtime stream starts automatically;"
+echo "the app shows live latency once its first rows land."

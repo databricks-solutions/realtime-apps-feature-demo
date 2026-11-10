@@ -5,6 +5,9 @@ variables:
   catalog:
     description: Unity Catalog that hosts the schema and checkpoint volume.
     default: main
+  schema:
+    description: UC schema that hosts the checkpoint volume and OTEL tables (bundle-created in `dev`; must already exist for `prod`).
+    default: realtime_apps_feature_demo
   project_id:
     description: Lakebase Autoscaling project slug. Must be globally unique within the workspace.
     default: realtime-demo
@@ -14,23 +17,83 @@ variables:
   database_name:
     description: Default database name in a new Lakebase Autoscaling project.
     default: databricks_postgres
-  pg_role:
-    description: Postgres role used by both the streaming sink and the FastAPI app.
-    default: demo_writer
-  pg_password:
-    description: Strong password for `pg_role`. Required; generate a unique value for every deployment.
   secret_scope:
-    description: Databricks secret scope holding Lakebase connection credentials.
+    description: Databricks secret scope holding the `lakebase_endpoint` the stream reads.
     default: realtime-demo
+  app_sp_id:
+    description: >-
+      App service-principal client id, granted write access to the OTEL schema
+      in the `dev` target. The app's SP only exists after the first deploy, so
+      this defaults to the deployer (a harmless placeholder — the schema creator
+      already has full access); after deploying, set it to the real SP id
+      (`databricks apps get realtime-demo` -> service_principal_client_id) and
+      redeploy so OTEL export can write. Unused by `prod` (schema is out-of-band).
+    default: ${workspace.current_user.userName}
+  job_cluster:
+    description: >-
+      Job-compute spec shared by both jobs. RTM requirements are baked in:
+      DBR 18.3+, Photon off (STANDARD),
+      autoscaling off (fixed num_workers), no spot (ON_DEMAND), and the
+      realTimeMode enable conf. A job cluster lives for its run — for the
+      continuous stream that is 24x7; the one-shot init boots one per run.
+    type: complex
+    default:
+      spark_version: 18.3.x-scala2.13
+      data_security_mode: SINGLE_USER
+      single_user_name: ${workspace.current_user.userName}
+      runtime_engine: STANDARD
+      node_type_id: m5d.large
+      # 16 GB driver: on m5d.large (8 GB) the 24x7 driver starts ~91% RAM + 50%
+      # swap and climbs until swap is exhausted, crashing the stream every
+      # ~54-65 h. Workers stay m5d.large (their swap stays low).
+      driver_node_type_id: m5d.xlarge
+      num_workers: 1
+      aws_attributes:
+        availability: ON_DEMAND
+        first_on_demand: 2
+      spark_conf:
+        spark.databricks.streaming.realTimeMode.enabled: "true"
+        spark.sql.execution.sortBeforeRepartition: "false"
 
 include:
   - resources/*.yml
 
-# Targets are workspace-agnostic. Pass `--profile <name>` at deploy time to
-# select which workspace to hit (or set `DATABRICKS_CONFIG_PROFILE`); the
-# `cluster_id` variable is required. See README's "Configure for your
-# workspace" section. Clone `dev` to add `prod`, `staging`, etc.
+# Targets are workspace-agnostic: pass `--profile <name>` at deploy time to pick
+# the workspace (or set `DATABRICKS_CONFIG_PROFILE`).
 targets:
+  # Throwaway iteration (default). Development mode prefixes resource names with
+  # `[dev <user>]` and isolates workspace files per user. The stream keeps its
+  # explicit `pause_status: UNPAUSED`, so a dev deploy also RUNS the 24x7 stream
+  # (under prefixed names) — and note it still shares the Lakebase project and
+  # secret scope with prod (those are plain vars, not mode-isolated).
   dev:
     default: true
     mode: development
+    # Dev-only: bundle-manage the UC schema and its OTEL grant, so a cloner
+    # deploying to a catalog they OWN gets a self-contained setup (requires
+    # CREATE SCHEMA on ${var.catalog}). `prod` references the governed schema
+    # out-of-band — see README prerequisites — so it has no schema resource.
+    resources:
+      schemas:
+        rt_demo_schema:
+          catalog_name: ${var.catalog}
+          name: ${var.schema}
+          comment: Realtime app demo — checkpoint volume + OTEL telemetry tables.
+          grants:
+            - principal: ${var.app_sp_id}
+              privileges:
+                - USE_SCHEMA
+                - CREATE_TABLE
+                - MODIFY
+                - SELECT
+
+  # The real 24x7 deployment. Production mode applies no dev presets, so the
+  # continuous stream keeps its authored `pause_status: UNPAUSED` (Standing
+  # Requirement #1) and resource names stay unprefixed. Deploy the live demo
+  # with `-t prod`.
+  prod:
+    mode: production
+    # Production mode requires an explicit root_path so exactly one copy is
+    # deployed. Keyed to the deployer so it stays profile/workspace-agnostic.
+    workspace:
+      root_path: /Workspace/Users/${workspace.current_user.userName}/.bundle/${bundle.name}/${bundle.target}

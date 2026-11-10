@@ -1,11 +1,41 @@
-command: ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${DATABRICKS_APP_PORT:-8000}"]
+# `opentelemetry-instrument` wraps uvicorn and auto-instruments FastAPI so HTTP
+# request traffic lands in `otel_spans` and request metrics in `otel_metrics`.
+# No changes to main.py needed. Databricks Apps injects the OTLP exporter
+# endpoint automatically once telemetry (catalog+schema) is enabled.
+# Run via `sh -c` so the shell expands ${DATABRICKS_APP_PORT} — the exec-list
+# form does NOT do ${...} substitution (uvicorn then gets the literal string).
+command: ["sh", "-c", "opentelemetry-instrument uvicorn main:app --host 0.0.0.0 --port ${DATABRICKS_APP_PORT:-8000}"]
 
 env:
-  - name: LAKEBASE_HOST
-    valueFrom: lakebase-host
-  - name: LAKEBASE_DB
-    valueFrom: lakebase-db
-  - name: LAKEBASE_USER
-    valueFrom: lakebase-user
-  - name: LAKEBASE_PASSWORD
-    valueFrom: lakebase-password
+  - name: OTEL_TRACES_SAMPLER
+    value: "always_on"
+  - name: OTEL_SERVICE_NAME
+    value: "realtime-demo"
+  # Make exporter selection explicit rather than relying on distro defaults:
+  # the platform injects a gRPC OTLP collector (:4317), and we want all three
+  # signals — traces, metrics, logs — to reach the UC tables named in
+  # resources/realtime_demo.app.yml (telemetry_export_destinations).
+  - name: OTEL_EXPORTER_OTLP_PROTOCOL
+    value: "grpc"
+  - name: OTEL_TRACES_EXPORTER
+    value: "otlp"
+  - name: OTEL_METRICS_EXPORTER
+    value: "otlp"
+  - name: OTEL_LOGS_EXPORTER
+    value: "otlp"
+  # The bound `postgres` resource injects PGHOST/PGPORT/PGDATABASE/PGUSER/PGSSLMODE
+  # (+ DATABRICKS_CLIENT_ID/SECRET from Apps) at runtime, but NOT an endpoint
+  # path — verified on a live deploy, despite some docs listing it. The app
+  # mints its OAuth DB credential against this full endpoint path (required
+  # format: projects/{project}/branches/{branch}/endpoints/{id}). `primary` is
+  # the read-write endpoint auto-created with the project, so this is stable
+  # across redeploys; keep project/branch in sync with the bundle vars.
+  - name: LAKEBASE_ENDPOINT
+    value: "projects/realtime-demo/branches/production/endpoints/primary"
+  # Retention: the 24x7 stream appends monotonic ids forever, so the app trims
+  # `events` to the trailing window to keep the table bounded (see main.py).
+  # Tune the window / cadence here.
+  - name: RETENTION_MINUTES
+    value: "5"
+  - name: RETENTION_INTERVAL_SECONDS
+    value: "30"

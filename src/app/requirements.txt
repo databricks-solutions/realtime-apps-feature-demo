@@ -1,3 +1,11 @@
 fastapi==0.153.0
 uvicorn[standard]==0.54.0
 asyncpg==0.32.0
+# WorkspaceClient + w.postgres.generate_database_credential for OAuth to Lakebase
+# (w.postgres needs SDK >= 0.81.0; pinned to the version verified on deploy).
+databricks-sdk==0.148.0
+# OpenTelemetry auto-instrumentation for Databricks Apps observability.
+# Populates otel_spans (HTTP traffic) + otel_metrics; no app-code changes.
+opentelemetry-distro==0.66b1
+opentelemetry-exporter-otlp-proto-grpc==1.45.1
+opentelemetry-instrumentation-fastapi==0.66b1

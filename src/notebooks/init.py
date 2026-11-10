@@ -6,12 +6,12 @@
 # MAGIC feeder telemetry so changing conditions can be investigated quickly.
 # MAGIC This bootstrap task prepares the operational serving layer for that view.
 # MAGIC
-# MAGIC Idempotent one-shot task that prepares Lakebase for the `stream` task:
+# MAGIC Idempotent one-shot task that prepares Lakebase for the `stream` job:
 # MAGIC resolves the Lakebase endpoint, mints an admin Postgres credential,
-# MAGIC creates (or rotates) the demo role, ensures the `events` table + index
-# MAGIC exist with hot-upsert autovacuum tuning, and writes the five
-# MAGIC connection secrets (host, db, user, password, endpoint) to the
-# MAGIC secret scope.
+# MAGIC ensures the `events` table + index exist with autovacuum tuning, looks
+# MAGIC up the app's service principal and grants it SELECT/DELETE, and writes
+# MAGIC the `lakebase_endpoint` secret the stream reads. (The app authenticates
+# MAGIC via OAuth, not a password — see resources/realtime_demo.app.yml.)
 
 # COMMAND ----------
 
@@ -19,14 +19,14 @@
 
 # COMMAND ----------
 
-# MAGIC %pip install --quiet "pg8000==1.31.2"
+# MAGIC %pip install --quiet "pg8000==1.31.6"
 
 # COMMAND ----------
 
 # MAGIC %md ## 1. Configuration via widgets
 # MAGIC
 # MAGIC Defaults stand in when this notebook is run interactively; the job
-# MAGIC passes real values via `base_parameters` in `resources/job.yml`.
+# MAGIC passes real values via `base_parameters` in `resources/realtime_demo_init.job.yml`.
 
 # COMMAND ----------
 
@@ -34,20 +34,23 @@ DEFAULTS = {
     "project_id": "realtime-demo",
     "branch_name": "production",
     "database_name": "databricks_postgres",
-    "pg_role": "demo_writer",
-    "pg_password": "",
     "secret_scope": "realtime-demo",
+    # The app's resource name. init looks up its service principal via the SDK
+    # and grants that role on `events` — so the app only needs to already exist
+    # (it's deployed before this one-shot runs). Empty = skip the grant.
+    "app_name": "realtime-demo",
 }
 for k, v in DEFAULTS.items():
     dbutils.widgets.text(k, v)
 p = {k: dbutils.widgets.get(k) for k in DEFAULTS}
 
-if len(p["pg_password"]) < 24:
-    raise ValueError("pg_password must be supplied and contain at least 24 characters")
-
 import re
 
-for field in ("project_id", "branch_name", "database_name", "pg_role", "secret_scope"):
+# These values are interpolated into REST paths and SQL identifiers, so accept
+# only simple identifiers. `app_name` may be empty (skip the grant).
+for field in ("project_id", "branch_name", "database_name", "secret_scope", "app_name"):
+    if field == "app_name" and not p[field]:
+        continue
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]{0,62}", p[field]):
         raise ValueError(f"Invalid {field}: expected a simple identifier, got {p[field]!r}")
 
@@ -112,18 +115,30 @@ admin_pg_token = post("/api/2.0/postgres/credentials", {"endpoint": endpoint_nam
 
 # COMMAND ----------
 
-# MAGIC %md ## 5. Bootstrap role, table, grants, and index
+# MAGIC %md ## 5. Ensure the table, index, autovacuum, and app grant
 # MAGIC
-# MAGIC Idempotent: `CREATE` or `ALTER` for the role (rotates the password on
-# MAGIC every run), `IF NOT EXISTS` for the table and index. Postgres DDL
-# MAGIC doesn't accept bind parameters, so the role password is inlined as a
-# MAGIC SQL literal with single-quote escaping.
+# MAGIC Idempotent: `IF NOT EXISTS` for the table and index, and `SELECT,DELETE`
+# MAGIC grants to the app's service-principal role (looked up from `app_name` via
+# MAGIC the SDK). No password role is created — the app authenticates via OAuth.
 
 # COMMAND ----------
 
-role   = p["pg_role"]
-db     = p["database_name"]
-pw_lit = "'" + p["pg_password"].replace("'", "''") + "'"
+db       = p["database_name"]
+app_name = p["app_name"]
+
+# Resolve the app's service-principal Postgres role so we can grant it. The app
+# is deployed before this one-shot runs, so a plain SDK lookup works — no SP id
+# to pass in, and no second deploy. It SELECTs for the API and DELETEs for the
+# retention loop; INSERTs come from the stream's workspace identity.
+app_sp = ""
+if app_name:
+    try:
+        app_sp = w.apps.get(name=app_name).service_principal_client_id
+    except Exception as e:  # noqa: BLE001 — grant is best-effort
+        print(f"Could not resolve service principal for app '{app_name}': {e}")
+# The client id is inlined as a quoted SQL identifier, so require a UUID.
+if app_sp and not re.fullmatch(r"[0-9a-fA-F-]{36}", app_sp):
+    raise ValueError(f"Unexpected service principal client id: {app_sp!r}")
 
 with dbapi.connect(
     host=lakebase_host, port=5432, database=db,
@@ -132,59 +147,48 @@ with dbapi.connect(
 ) as conn:
     conn.autocommit = True
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM pg_roles WHERE rolname = %s", (role,))
-    verb = "ALTER" if cur.fetchone() else "CREATE"
-    cur.execute(f'{verb} ROLE "{role}" WITH LOGIN PASSWORD {pw_lit}')
-    cur.execute(f"""
-        GRANT ALL ON DATABASE "{db}" TO "{role}";
-        GRANT ALL ON SCHEMA public  TO "{role}";
+    # No bind parameters, so pg8000 sends this as one simple-protocol query,
+    # which allows multiple statements.
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS events (
             id        BIGINT PRIMARY KEY,
             timestamp TIMESTAMPTZ NOT NULL,
             metric    DOUBLE PRECISION
         );
-        GRANT ALL ON TABLE events TO "{role}";
         CREATE INDEX IF NOT EXISTS events_ts_idx ON events (timestamp DESC);
-        -- Aggressive per-table autovacuum: this table is a hot-key-upsert
-        -- workload across successive demo runs (rate source resets its
-        -- `startTimeMs` each run, so `id`s collide with prior-run rows and
-        -- every subsequent row is an UPDATE). Postgres defaults wait for
-        -- 20% of the table to churn before autovacuuming, which is far
-        -- too slow here; without this the table bloats and both the sink
-        -- and the app's reads slow down. Guidance from the shipping
-        -- `databricks-spark-structured-streaming` skill.
+        -- Aggressive per-table autovacuum: the 24x7 stream appends while the app
+        -- deletes old rows every ~30s, so dead tuples pile up fast. Postgres
+        -- defaults wait for 20% churn before vacuuming, far too slow here;
+        -- without this the table bloats and both the sink and reads slow down.
+        -- Guidance from the databricks-spark-structured-streaming skill.
         ALTER TABLE events SET (
             autovacuum_vacuum_scale_factor = 0,
             autovacuum_vacuum_threshold    = 200,
             autovacuum_vacuum_cost_delay   = 0
         );
     """)
-print(f"Role {role} ready; events table + index ready; autovacuum tuned.")
+    if app_sp:
+        cur.execute(f'GRANT USAGE ON SCHEMA public TO "{app_sp}"')
+        cur.execute(f'GRANT SELECT, DELETE ON TABLE events TO "{app_sp}"')
+        print(f"events table + index ready; autovacuum tuned; SELECT+DELETE granted to app SP {app_sp}.")
+    else:
+        print("events table + index ready; autovacuum tuned. App SP not resolved — "
+              "skipped the app grant (deploy the app first, then re-run init).")
 
 # COMMAND ----------
 
-# MAGIC %md ## 6. Refresh connection secrets
+# MAGIC %md ## 6. Write the streaming endpoint secret
 # MAGIC
-# MAGIC The FastAPI app reads `lakebase_host` / `_db` / `_user` / `_password`
-# MAGIC to connect via Postgres password auth. The `stream` task uses the
-# MAGIC native `format("postgresql")` sink, which authenticates via the
-# MAGIC query-runner's workspace identity — it only needs the fifth key,
-# MAGIC `lakebase_endpoint`, in `project_id.branch_id` shorthand.
+# MAGIC The `stream` job uses the native `format("postgresql")` sink, which
+# MAGIC authenticates via the query-runner's workspace identity and only needs
+# MAGIC `lakebase_endpoint` in `project_id.branch_id` shorthand. The app uses no
+# MAGIC password secrets — it binds the Lakebase `postgres` resource and
+# MAGIC authenticates via OAuth.
 
 # COMMAND ----------
 
 scope = p["secret_scope"]
-# `lakebase_endpoint` in `<project_id>.<branch_id>` shorthand form is what
-# the native `format("postgresql")` streaming sink expects for its
-# `endpoint` option in the explicit-endpoint form. The stream task reads
-# this and passes it through; the FastAPI app uses the other four keys
-# for its asyncpg password-auth connection (Databricks Apps runs in a
-# separate security context and can't inherit workspace OAuth).
 lakebase_endpoint = f"{p['project_id']}.{p['branch_name']}"
-for key, val in [("lakebase_host",     lakebase_host),
-                 ("lakebase_db",       db),
-                 ("lakebase_user",     role),
-                 ("lakebase_password", p["pg_password"]),
-                 ("lakebase_endpoint", lakebase_endpoint)]:
-    post("/api/2.0/secrets/put", {"scope": scope, "key": key, "string_value": val})
-print(f"Wrote 5 secrets to scope `{scope}`.")
+post("/api/2.0/secrets/put",
+     {"scope": scope, "key": "lakebase_endpoint", "string_value": lakebase_endpoint})
+print(f"Wrote lakebase_endpoint to scope `{scope}`.")

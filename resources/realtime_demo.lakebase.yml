@@ -1,0 +1,25 @@
+resources:
+  postgres_projects:
+    rt_demo_lakebase:
+      project_id: ${var.project_id}
+      display_name: Realtime Demo
+      pg_version: 17
+      default_endpoint_settings:
+        autoscaling_limit_min_cu: 0.5
+        autoscaling_limit_max_cu: 1
+        no_suspension: true
+
+  # The schema `${var.schema}` is bundle-managed only in the `dev` target (see
+  # databricks.yml); `prod` expects it to exist already (governed catalogs don't
+  # let the deployer CREATE SCHEMA). The volume is created inside that schema
+  # (requires CREATE VOLUME / ALL_PRIVILEGES on it).
+  volumes:
+    rt_demo_checkpoints:
+      catalog_name: ${var.catalog}
+      schema_name: ${var.schema}
+      name: checkpoints
+      volume_type: MANAGED
+
+  # The secret scope `realtime-demo` is created out-of-band (one-time per
+  # workspace; scripts/deploy.sh does it). `init` writes the `lakebase_endpoint`
+  # key the stream reads; the app binds no secrets (it uses OAuth).
