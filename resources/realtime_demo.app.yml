@@ -1,0 +1,33 @@
+resources:
+  apps:
+    rt_demo_app:
+      name: realtime-demo
+      description: Grid operations telemetry — FastAPI + HTML polling at 100ms against Lakebase.
+      source_code_path: ../src/app
+      # [Public Preview] OTEL telemetry export. Without this block, the platform
+      # does NOT inject the OTLP collector endpoint, the OTel SDK falls back to
+      # localhost:4317, and every export fails (Connection refused) — so
+      # otel_spans/otel_metrics/otel_logs stay empty. Keep it here so `bundle
+      # deploy` never drops it. Note: only logs/metrics/traces are export targets;
+      # otel_annotations is a separate TAG/ASSESSMENT store, not an OTLP target.
+      # Tables live in the checkpoint volume's schema, resolved so `dev`'s
+      # prefixed schema is used there.
+      telemetry_export_destinations:
+        - unity_catalog:
+            logs_table: ${resources.volumes.rt_demo_checkpoints.catalog_name}.${resources.volumes.rt_demo_checkpoints.schema_name}.otel_logs
+            metrics_table: ${resources.volumes.rt_demo_checkpoints.catalog_name}.${resources.volumes.rt_demo_checkpoints.schema_name}.otel_metrics
+            traces_table: ${resources.volumes.rt_demo_checkpoints.catalog_name}.${resources.volumes.rt_demo_checkpoints.schema_name}.otel_spans
+      resources:
+        # Lakebase binding (Autoscaling form, CLI 1.20.0+). CAN_CONNECT_AND_CREATE
+        # provisions the app service principal's Postgres role, and the platform
+        # injects PGHOST/PGPORT/PGDATABASE/PGUSER/PGSSLMODE/PGAPPNAME at runtime —
+        # but no endpoint path, so LAKEBASE_ENDPOINT is set in src/app/app.yaml.
+        # The app mints short-lived OAuth credentials for that role — no password,
+        # no secret bindings (see src/app/main.py). The streaming path still reads
+        # the `lakebase_endpoint` secret separately (it isn't bound to the app).
+        - name: lakebase
+          description: Lakebase Postgres (OAuth via the app service principal)
+          postgres:
+            branch: projects/${var.project_id}/branches/${var.branch_name}
+            database: projects/${var.project_id}/branches/${var.branch_name}/databases/databricks-postgres
+            permission: CAN_CONNECT_AND_CREATE

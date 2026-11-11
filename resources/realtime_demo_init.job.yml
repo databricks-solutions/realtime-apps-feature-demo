@@ -1,0 +1,29 @@
+resources:
+  jobs:
+    # One-shot setup job. Split from the stream job on purpose: a `continuous`
+    # job may not contain task dependencies (the API rejects `depends_on`), so
+    # the init → stream DAG can't live in one continuous job. `init` creates the
+    # `events` table, index, app grant, and endpoint secret (all persist), so it runs ONCE at
+    # setup; the stream (realtime_demo_stream.job.yml) is always-on and wipes its
+    # own checkpoint each run, needing nothing from init on a restart.
+    rt_demo_init_job:
+      name: realtime-demo-init
+      max_concurrent_runs: 1
+      # Run once at setup:  databricks bundle run rt_demo_init_job -t dev --profile <P>
+      tasks:
+        - task_key: init
+          # Dedicated job cluster (not an all-purpose cluster). init is one-shot,
+          # so this boots per run; the RTM-ready spec is reused for simplicity.
+          new_cluster: ${var.job_cluster}
+          notebook_task:
+            notebook_path: ../src/notebooks/init.py
+            base_parameters:
+              project_id: ${var.project_id}
+              branch_name: ${var.branch_name}
+              database_name: ${var.database_name}
+              secret_scope: ${var.secret_scope}
+              # The app's resource name — init looks the app up via the SDK and
+              # grants its service principal on `events` (no app_sp_id to set, no
+              # second deploy). Dev mode doesn't prefix app names, so this literal
+              # is correct for both targets; keep it in sync with the app `name`.
+              app_name: realtime-demo

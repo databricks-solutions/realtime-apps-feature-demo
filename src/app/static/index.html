@@ -37,7 +37,7 @@
          │
          ▼
 ②  Native `format("postgresql")` sink
-   buffers up to `batchinterval` (100 ms)
+   buffers up to `batchinterval` (20 ms)
    or `batchsize` (1000 rows), workspace-
    managed JDBC connection
    src/notebooks/stream.py
@@ -64,9 +64,12 @@
 
 <script>
   // KPI poll cadence, chart redraw cadence, chart bin width, visible window,
-  // how many rows to ask the API for (~20 s at 10 rps + headroom), and axis
-  // padding (px) reserved on the left/bottom of the canvas for tick labels.
-  const POLL = 100, CHART = 1000, BUCKET = 1000, WIN = 20_000, LIMIT = 250;
+  // how many rows to ask the API for, and axis padding (px) reserved on the
+  // left/bottom of the canvas for tick labels. The chart redraws at the poll
+  // cadence (100 ms) into 200 ms buckets so the line tracks live latency with
+  // no artificial lag. LIMIT only needs to exceed new-events-per-poll (~50 at
+  // 500 rps / 100 ms poll); samples then accumulate client-side up to WIN.
+  const POLL = 100, CHART = 100, BUCKET = 200, WIN = 20_000, LIMIT = 250;
   const PAD_L = 30, PAD_B = 18;
 
   // Resize the canvas's backing store to match its CSS box (called on resize).
@@ -122,7 +125,7 @@
     }
   }
 
-  // redraw: bin samples (not events) into wall-clock-aligned 1 s buckets and
+  // redraw: bin samples (not events) into wall-clock-aligned BUCKET-ms buckets and
   // plot one point per bucket at y = 1 − mean(ingest_ms)/1000. The y-axis
   // shows average ingest→serve latency in seconds; the top of the chart is
   // 1 s. KPIs come from the rightmost (current) bucket's mean; `id` is the

@@ -6,9 +6,11 @@
 # MAGIC app in under 500 ms, illustrating faster awareness of emerging conditions.
 # MAGIC
 # MAGIC Rate source → Real-Time Mode → Lakebase via the native
-# MAGIC `format("postgresql")` sink (Public Preview, DBR 18.3+). Runs for
-# MAGIC `run_duration_seconds` (default 1 h) then stops cleanly. Depends on
-# MAGIC the `init` task to have prepared the endpoint, role, and secrets.
+# MAGIC `format("postgresql")` sink (Public Preview, DBR 18.3+). With
+# MAGIC `run_duration_seconds <= 0` (the default) it streams indefinitely for
+# MAGIC 24x7 operation; a positive value time-boxes the run and stops cleanly.
+# MAGIC Depends on the one-shot `init` job having created the `events` table and
+# MAGIC the `lakebase_endpoint` secret.
 # MAGIC
 # MAGIC Reference: `lakebase-sink-python.md` in the
 # MAGIC [databricks-agent-skills](https://github.com/databricks/databricks-agent-skills)
@@ -23,7 +25,9 @@
 dbutils.widgets.text("checkpoint_path", "")
 dbutils.widgets.text("secret_scope", "realtime-demo")
 dbutils.widgets.text("rows_per_second", "500")
-dbutils.widgets.text("run_duration_seconds", "3600")
+# `run_duration_seconds <= 0` streams indefinitely (24x7 mode); a positive
+# value time-boxes the run for a demo, then stops cleanly.
+dbutils.widgets.text("run_duration_seconds", "0")
 # `batchinterval` is the native sink's max buffer hold time before
 # flushing. Lower = lower per-row latency; higher = fewer/larger commits.
 # Default is 100 milliseconds per docs. The sink also flushes when
@@ -34,7 +38,7 @@ dbutils.widgets.text("run_duration_seconds", "3600")
 # INVALID_INTERVAL_FORMAT.MISSING_UNIT) and NOT `"100 ms"` (fails with
 # INVALID_INTERVAL_FORMAT.INVALID_UNIT — the parser doesn't accept the
 # `ms` abbreviation, only `milliseconds` / `millisecond` / `millis`).
-dbutils.widgets.text("sink_batchinterval", "100 milliseconds")
+dbutils.widgets.text("sink_batchinterval", "20 milliseconds")
 
 checkpoint_path    = dbutils.widgets.get("checkpoint_path")
 scope              = dbutils.widgets.get("secret_scope")
@@ -46,12 +50,11 @@ sink_batchinterval = dbutils.widgets.get("sink_batchinterval")
 
 # MAGIC %md ## 2. Clean up state from any prior run
 # MAGIC
-# MAGIC With `existing_cluster_id` the Spark session is shared across job
-# MAGIC runs; a cancelled run can leave its stream(s) active and holding the
-# MAGIC checkpoint dir. The rate source also persists `startTimeMs` in the
-# MAGIC checkpoint, so resuming from a stale one emits events with old
-# MAGIC timestamps. Stop orphan streams and wipe the checkpoint so this run
-# MAGIC starts fresh in clock time.
+# MAGIC The rate source persists `startTimeMs` in the checkpoint, so resuming
+# MAGIC from a stale one would emit events with old timestamps — wipe the
+# MAGIC checkpoint so this run starts fresh in clock time. Each continuous run
+# MAGIC now gets its own fresh job cluster, so stopping orphan streams below is
+# MAGIC just defensive (e.g. a manual run on a reused cluster).
 
 # COMMAND ----------
 
@@ -107,13 +110,22 @@ stream = (
 
 # COMMAND ----------
 
-# MAGIC %md ## 4. Run for the bounded duration, then stop cleanly
+# MAGIC %md ## 4. Run: indefinitely for 24x7, or for a bounded duration
 # MAGIC
-# MAGIC `stream.stop()` flushes any pending sink buffer before exit.
+# MAGIC With `run_duration_seconds <= 0` the query runs until the job run is
+# MAGIC cancelled or the query fails — the `continuous` job
+# MAGIC (resources/realtime_demo_stream.job.yml)
+# MAGIC then restarts the whole graph automatically, giving 24x7 coverage. A
+# MAGIC positive value time-boxes the run; `stream.stop()` flushes any pending
+# MAGIC sink buffer before exit.
 
 # COMMAND ----------
 
-stream.awaitTermination(timeout=duration)
-if stream.isActive:
-    stream.stop()
-print(f"Stream stopped after {duration}s.")
+if duration > 0:
+    stream.awaitTermination(timeout=duration)
+    if stream.isActive:
+        stream.stop()
+    print(f"Stream stopped after {duration}s.")
+else:
+    print("run_duration_seconds <= 0: streaming indefinitely (24x7 mode).")
+    stream.awaitTermination()

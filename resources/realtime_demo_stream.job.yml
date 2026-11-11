@@ -1,0 +1,39 @@
+resources:
+  jobs:
+    # Always-on 24x7 stream job. Separate from init (realtime_demo_init.job.yml)
+    # because a `continuous` job can't contain inter-task `depends_on`.
+    rt_demo_stream_job:
+      name: realtime-demo-stream
+      max_concurrent_runs: 1
+      # 24x7 operation: `continuous` keeps exactly one run active at all times
+      # and auto-restarts on completion or failure. Paired with
+      # `run_duration_seconds: "0"` below, the stream runs indefinitely, so
+      # `continuous` only re-triggers on failure. There is deliberately NO
+      # `timeout_seconds` — a job-level timeout would kill the 24x7 stream (the
+      # old 4000 s cap severed data after ~66 min).
+      continuous:
+        pause_status: UNPAUSED
+      tasks:
+        - task_key: stream
+          # Dedicated job cluster (not an all-purpose cluster). For a continuous
+          # job the cluster is created once and lives for the 24x7 run.
+          new_cluster: ${var.job_cluster}
+          notebook_task:
+            notebook_path: ../src/notebooks/stream.py
+            base_parameters:
+              # In `mode: development`, DAB prefixes the bundle-created schema
+              # with `dev_<user>_…`; reading the volume's resolved fields (not
+              # ${var.schema}) keeps the path right on every target.
+              checkpoint_path: /Volumes/${resources.volumes.rt_demo_checkpoints.catalog_name}/${resources.volumes.rt_demo_checkpoints.schema_name}/${resources.volumes.rt_demo_checkpoints.name}/rt_demo
+              secret_scope: ${var.secret_scope}
+              rows_per_second: "500"
+              # "0" = stream indefinitely for 24x7 (see the continuous block
+              # above and src/notebooks/stream.py). Set a positive value to
+              # time-box a demo run instead.
+              run_duration_seconds: "0"
+              # Native `format("postgresql")` sink flushes on `batchinterval`
+              # elapsed OR `batchsize` rows (default 1000), whichever hits
+              # first. Must be a Spark interval string using long-form
+              # unit names ("100 milliseconds", not "100" or "100 ms").
+              # See stream.py's widget docstring.
+              sink_batchinterval: "20 milliseconds"
